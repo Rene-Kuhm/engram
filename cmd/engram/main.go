@@ -2207,10 +2207,14 @@ func printPostInstall(result *setup.Result) {
 	case "opencode":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
-		fmt.Println("  2. Run 'engram serve &' for session tracking (HTTP API)")
+		fmt.Println("  2. The plugin auto-starts the Engram HTTP server when needed")
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
+	case "pi":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart Pi so packages and MCP config are reloaded")
+		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
 		// Offer to add engram tools to the permissions allowlist
 		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
@@ -2285,7 +2289,7 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status

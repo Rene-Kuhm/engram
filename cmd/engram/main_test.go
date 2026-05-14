@@ -166,6 +166,9 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
+	if !strings.Contains(stdout, "opencode, pi, claude-code, gemini-cli, codex") {
+		t.Fatalf("usage missing pi setup agent: %q", stdout)
+	}
 	if !strings.Contains(stdout, "cloud <subcommand>") {
 		t.Fatalf("usage missing cloud command tree: %q", stdout)
 	}
@@ -198,15 +201,22 @@ func TestPrintPostInstall(t *testing.T) {
 		notExpects []string
 	}{
 		{
-			name:    "opencode with subagent monitor enabled",
-			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "engram serve &"},
+			name:       "opencode with subagent monitor enabled",
+			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
+			expects:    []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{"engram serve &"},
 		},
 		{
 			name:       "opencode with subagent monitor not enabled",
 			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "engram serve &"},
-			notExpects: []string{"opencode-subagent-statusline"},
+			expects:    []string{"Restart OpenCode", "auto-starts"},
+			notExpects: []string{"opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "pi",
+			result:     &setup.Result{Agent: "pi"},
+			expects:    []string{"Restart Pi", "pi list"},
+			notExpects: []string{"ENGRAM_BIN"},
 		},
 		{
 			name:    "gemini-cli",
