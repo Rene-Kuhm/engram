@@ -2015,6 +2015,50 @@ func (s *Store) GetSession(id string) (*Session, error) {
 	return &sess, nil
 }
 
+// MostRecentActiveSession resolves the active (un-ended) session for a project
+// from the persisted sessions table. It returns the session ID and ok=true when
+// such a session exists, or ok=false when none does.
+//
+// This is the cross-process resolution that fixes issue #386: the SessionStart
+// hook registers a UUID session via the HTTP server (POST /sessions) in one
+// process, while mem_save runs in the separate MCP (stdio) process. The two
+// share only the SQLite store, so the active session must be read from disk —
+// never from in-memory state.
+//
+// Selection rules:
+//   - Scope to the (normalized) project.
+//   - Require ended_at IS NULL — ended sessions are never returned, so stale
+//     sessions naturally fall out without any explicit clearing step.
+//   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
+//     are created by the fallback path itself and must not be resolved as "the
+//     active session", which would make resolution circular.
+//   - When multiple un-ended sessions exist, pick the MOST RECENT by
+//     started_at DESC, with id DESC as a deterministic tie-breaker.
+func (s *Store) MostRecentActiveSession(project string) (string, bool, error) {
+	project, _ = NormalizeProject(project)
+	if project == "" {
+		return "", false, nil
+	}
+
+	var id string
+	err := s.db.QueryRow(`
+		SELECT id
+		FROM sessions
+		WHERE LOWER(project) = ?
+		  AND ended_at IS NULL
+		  AND id NOT LIKE 'manual-save%'
+		ORDER BY datetime(started_at) DESC, id DESC
+		LIMIT 1
+	`, project).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
+}
+
 func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, error) {
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
