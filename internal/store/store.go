@@ -1231,37 +1231,70 @@ func (s *Store) RepairCloudUpgrade(project string, apply bool) (CloudUpgradeRepa
 	if err != nil {
 		return CloudUpgradeRepairReport{}, fmt.Errorf("diagnose legacy cloud upgrade mutations: %w", err)
 	}
-	if legacyReport.BlockedCount > 0 {
-		first := legacyReport.Findings[0]
-		return CloudUpgradeRepairReport{
-			Class:      UpgradeRepairClassBlocked,
-			ReasonCode: UpgradeReasonBlockedLegacyMutationManual,
-			Message:    fmt.Sprintf("manual-action-required: %s (seq=%d entity=%s op=%s)", first.Message, first.Seq, first.Entity, first.Op),
-			Applied:    false,
-		}, nil
-	}
-	if legacyReport.RepairableCount > 0 {
-		report := CloudUpgradeRepairReport{
-			Class:         UpgradeRepairClassRepairable,
-			ReasonCode:    UpgradeReasonRepairableLegacyMutationPayload,
-			Message:       fmt.Sprintf("project %q has %d repairable legacy mutation payload issue(s)", project, legacyReport.RepairableCount),
-			PlannedAction: "repair_legacy_mutation_payloads",
-			Applied:       false,
-		}
-		if !apply {
-			return report, nil
-		}
+	// When both repairable and blocked mutations coexist we must not hold the
+	// entire repair pass hostage to the non-repairable entries. Apply the
+	// repairable subset first, then surface the residual blockers.
+	appliedRepairs := false
+	if apply && legacyReport.RepairableCount > 0 {
 		if err := s.applyCloudUpgradeLegacyMutationRepairs(project); err != nil {
 			return CloudUpgradeRepairReport{}, fmt.Errorf("apply cloud upgrade legacy mutation repairs: %w", err)
 		}
-		report.Applied = true
-		report.Message = fmt.Sprintf("applied deterministic legacy mutation payload repairs for project %q", project)
+		appliedRepairs = true
+	}
+
+	if legacyReport.BlockedCount > 0 {
+		// Scan for the first non-repairable finding so the operator sees the
+		// actual blocker. Findings[0] is ordered by seq and may be a repairable
+		// entry, which previously produced a misleading error message (#446).
+		var blocked CloudUpgradeLegacyMutationFinding
+		for _, f := range legacyReport.Findings {
+			if !f.Repairable {
+				blocked = f
+				break
+			}
+		}
+		var msg string
+		switch {
+		case appliedRepairs:
+			msg = fmt.Sprintf("applied %d repairable payload(s); %d remain blocked: manual-action-required: %s (seq=%d entity=%s entity_key=%q op=%s)",
+				legacyReport.RepairableCount, legacyReport.BlockedCount, blocked.Message, blocked.Seq, blocked.Entity, blocked.EntityKey, blocked.Op)
+		case legacyReport.RepairableCount > 0:
+			msg = fmt.Sprintf("%d repairable payload(s) would apply; %d would remain blocked: manual-action-required: %s (seq=%d entity=%s entity_key=%q op=%s)",
+				legacyReport.RepairableCount, legacyReport.BlockedCount, blocked.Message, blocked.Seq, blocked.Entity, blocked.EntityKey, blocked.Op)
+		default:
+			msg = fmt.Sprintf("manual-action-required: %s (seq=%d entity=%s entity_key=%q op=%s)",
+				blocked.Message, blocked.Seq, blocked.Entity, blocked.EntityKey, blocked.Op)
+		}
+		return CloudUpgradeRepairReport{
+			Class:      UpgradeRepairClassBlocked,
+			ReasonCode: UpgradeReasonBlockedLegacyMutationManual,
+			Message:    msg,
+			Applied:    appliedRepairs,
+		}, nil
+	}
+
+	if legacyReport.RepairableCount > 0 {
+		if !appliedRepairs {
+			return CloudUpgradeRepairReport{
+				Class:         UpgradeRepairClassRepairable,
+				ReasonCode:    UpgradeReasonRepairableLegacyMutationPayload,
+				Message:       fmt.Sprintf("project %q has %d repairable legacy mutation payload issue(s)", project, legacyReport.RepairableCount),
+				PlannedAction: "repair_legacy_mutation_payloads",
+				Applied:       false,
+			}, nil
+		}
 		_ = s.SaveCloudUpgradeState(CloudUpgradeState{
 			Project:     project,
 			Stage:       UpgradeStageRepairApplied,
 			RepairClass: UpgradeRepairClassRepairable,
 		})
-		return report, nil
+		return CloudUpgradeRepairReport{
+			Class:         UpgradeRepairClassRepairable,
+			ReasonCode:    UpgradeReasonRepairableLegacyMutationPayload,
+			Message:       fmt.Sprintf("applied deterministic legacy mutation payload repairs for project %q", project),
+			PlannedAction: "repair_legacy_mutation_payloads",
+			Applied:       true,
+		}, nil
 	}
 
 	requiresBackfill, err := s.projectSyncBackfillRequired(project)
