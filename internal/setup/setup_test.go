@@ -1406,7 +1406,10 @@ func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 				return nil, os.ErrNotExist
 			}
 
-			if got := resolveEngramCommand(); got != tc.want {
+			// Normalize separators so the comparison holds on Windows runners,
+			// where resolveEngramCommand returns OS-native separators via
+			// filepath.FromSlash while tc.want is written with forward slashes.
+			if got := filepath.ToSlash(resolveEngramCommand()); got != tc.want {
 				t.Fatalf("resolveEngramCommand() = %q, want %q", got, tc.want)
 			}
 		})
