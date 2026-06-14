@@ -815,7 +815,54 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		}
 
 		resultSyncID = existingSyncID
-		return nil
+
+		// ── Enqueue sync mutation when project is enrolled ─────────────────────
+		// Derive source project for the enrollment check (mirrors JudgeRelation).
+		var srcProject, tgtProject string
+		_ = tx.QueryRow(
+			`SELECT ifnull(project,'') FROM observations WHERE sync_id = ?`, p.SourceID,
+		).Scan(&srcProject)
+		_ = tx.QueryRow(
+			`SELECT ifnull(project,'') FROM observations WHERE sync_id = ?`, p.TargetID,
+		).Scan(&tgtProject)
+
+		enrollCheckProject := srcProject
+		if enrollCheckProject == "" {
+			enrollCheckProject = tgtProject
+		}
+		var enrolled int
+		if err := tx.QueryRow(
+			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, enrollCheckProject,
+		).Scan(&enrolled); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("JudgeBySemantic: check enrollment: %w", err)
+		}
+		if enrolled == 0 {
+			return nil // not enrolled — backfill will cover it on enrollment
+		}
+
+		// Build payload from the freshly-written row.
+		rel, err := s.getRelationTx(tx, existingSyncID)
+		if err != nil {
+			return fmt.Errorf("JudgeBySemantic: read relation for enqueue: %w", err)
+		}
+		payload := syncRelationPayload{
+			SyncID:         rel.SyncID,
+			SourceID:       rel.SourceID,
+			TargetID:       rel.TargetID,
+			Relation:       rel.Relation,
+			Reason:         rel.Reason,
+			Evidence:       rel.Evidence,
+			Confidence:     rel.Confidence,
+			JudgmentStatus: rel.JudgmentStatus,
+			MarkedByActor:  rel.MarkedByActor,
+			MarkedByKind:   rel.MarkedByKind,
+			MarkedByModel:  rel.MarkedByModel,
+			SessionID:      rel.SessionID,
+			Project:        srcProject,
+			CreatedAt:      rel.CreatedAt,
+			UpdatedAt:      rel.UpdatedAt,
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntityRelation, rel.SyncID, SyncOpUpsert, payload)
 	}); err != nil {
 		return "", err
 	}
