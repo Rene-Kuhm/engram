@@ -780,6 +780,68 @@ func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
 	}
 }
 
+// TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk covers the second
+// branch of the export filter: a relation already present in a prior chunk but
+// re-judged after the latest chunk must be exported again so the update
+// propagates. A regression to pure presence-based filtering would silently drop
+// this update while every other relation test still passes.
+func TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+
+	// rel-updated already lives in a prior chunk (already exported)...
+	seedRelationForProject(t, s, "proj-a", "sess-updated", "rel-updated")
+	// ...but it was re-judged AFTER that chunk's CreatedAt (2025-06-01).
+	if _, err := s.DB().Exec(
+		`UPDATE memory_relations SET updated_at='2025-07-01 00:00:00' WHERE sync_id='rel-updated'`,
+	); err != nil {
+		t.Fatalf("bump rel-updated: %v", err)
+	}
+
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	writeLocalChunkFile(t, syncDir, "pastchunk00", ChunkData{
+		Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-updated",
+			Op:        store.SyncOpUpsert,
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{
+		Version: 1,
+		Chunks:  []ChunkEntry{{ID: "pastchunk00", CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
+	})
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected export to re-export the updated relation, got empty result")
+	}
+
+	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+
+	found := false
+	for _, m := range chunk.Mutations {
+		if m.EntityKey == "rel-updated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("relation updated after the last chunk must be re-exported, got mutations %+v", chunk.Mutations)
+	}
+}
+
 func TestUpgradeDeterministicReasonCodes(t *testing.T) {
 	tests := []struct {
 		name            string

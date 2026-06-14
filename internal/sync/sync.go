@@ -1155,11 +1155,13 @@ func (sy *Syncer) exportedRelationKeys(m *Manifest) (map[string]struct{}, error)
 	if m == nil {
 		return keys, nil
 	}
-	chunksDir := filepath.Join(sy.syncDir, "chunks")
 	for _, entry := range m.Chunks {
-		raw, err := readGzip(filepath.Join(chunksDir, entry.ID+".jsonl.gz"))
+		// Read through the transport (not the local filesystem directly) so the
+		// scan honors the active backend — the import path uses the same
+		// contract. A missing chunk surfaces as ErrChunkNotFound.
+		raw, err := sy.transport.ReadChunk(entry.ID)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, ErrChunkNotFound) {
 				// The manifest can list chunks that live on another machine and
 				// were never pulled locally. A missing chunk contributes no known
 				// relations; at worst a relation is re-exported, which is an
