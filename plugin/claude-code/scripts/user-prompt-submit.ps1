@@ -30,7 +30,8 @@ function Invoke-EngramPromptPersist {
     [string]$Project,
     [string]$Prompt
   )
-  # Fire-and-forget: never blocks and never fails the hook.
+  # Fail-silent and bounded: a short timeout keeps a slow/unreachable server
+  # from stalling prompt submission, and any error is swallowed.
   if ([string]::IsNullOrWhiteSpace($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId)) { return }
   try {
     $body = [PSCustomObject]@{
@@ -39,7 +40,7 @@ function Invoke-EngramPromptPersist {
       content    = $Prompt
     } | ConvertTo-Json -Compress
     $null = Invoke-RestMethod -Method Post -Uri "$EngramUrl/prompts" `
-      -ContentType 'application/json' -Body $body -TimeoutSec 2
+      -ContentType 'application/json' -Body $body -TimeoutSec 1
   } catch { }
 }
 
