@@ -118,16 +118,18 @@ func agentAdapters() []agentAdapter {
 		},
 		{
 			slug:        "cursor",
-			description: "Cursor — MCP registration in ~/.cursor/mcp.json plus an always-applied .mdc rule",
+			description: "Cursor — MCP registration in ~/.cursor/mcp.json plus an informational Memory Protocol file to paste as a User Rule",
 			mcpPath:     cursorMCPPath,
 			mcpFormat:   mcpServersObject,
 			instructions: []instrSurface{
-				{path: cursorRulesPath, style: wholeFile, body: cursorRulesBody()},
+				{path: cursorMemoryProtocolPath, style: wholeFile, body: memoryProtocolMarkdown},
 			},
 			postInstall: []string{
 				"Restart Cursor so MCP config is reloaded",
 				"Verify ~/.cursor/mcp.json includes mcpServers.engram",
-				"Verify ~/.cursor/rules/engram.mdc exists (always-applied rule)",
+				"NOTE: Cursor does NOT read global rule files from the filesystem — .mdc files outside a project are silently ignored",
+				"Open ~/.cursor/engram-memory-protocol.md and copy its contents",
+				"In Cursor, open Settings → Rules → User Rules and paste the copied contents",
 			},
 		},
 		{
@@ -159,13 +161,6 @@ func agentAdapters() []agentAdapter {
 			},
 		},
 	}
-}
-
-// cursorRulesBody wraps the Memory Protocol in the YAML frontmatter Cursor needs
-// for an always-applied rule (alwaysApply:true ignores globs and attaches the rule
-// regardless of context).
-func cursorRulesBody() string {
-	return "---\ndescription: Engram persistent memory protocol\nalwaysApply: true\n---\n\n" + memoryProtocolMarkdown
 }
 
 // vscodeInstructionsBody wraps the Memory Protocol in the frontmatter VS Code
@@ -237,9 +232,14 @@ func cursorMCPPath() string {
 	return filepath.Join(home, ".cursor", "mcp.json")
 }
 
-func cursorRulesPath() string {
+// cursorMemoryProtocolPath returns the path to the informational Memory Protocol
+// file for Cursor. Cursor does not read global rule files from the filesystem;
+// .mdc files with alwaysApply outside a project are silently ignored. This file
+// is intended to be opened by the user and its contents pasted into
+// Settings → Rules → User Rules inside Cursor.
+func cursorMemoryProtocolPath() string {
 	home, _ := userHome()
-	return filepath.Join(home, ".cursor", "rules", "engram.mdc")
+	return filepath.Join(home, ".cursor", "engram-memory-protocol.md")
 }
 
 // ─── VS Code (Copilot) paths ─────────────────────────────────────────────────

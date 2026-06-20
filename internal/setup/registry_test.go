@@ -28,7 +28,7 @@ func declarativeAgents() []declarativeAgent {
 		{"windsurf", windsurfMCPPath, "mcpServers", mcpServersObject, windsurfRulesPath, markerBlock},
 		{"qwen", qwenSettingsPath, "mcpServers", mcpServersObject, qwenContextPath, markerBlock},
 		{"kiro", kiroMCPPath, "mcpServers", mcpServersObject, kiroSteeringPath, markerBlock},
-		{"cursor", cursorMCPPath, "mcpServers", mcpServersObject, cursorRulesPath, wholeFile},
+		{"cursor", cursorMCPPath, "mcpServers", mcpServersObject, cursorMemoryProtocolPath, wholeFile},
 		{"vscode-copilot", vscodeMCPPath, "servers", serversObject, vscodePromptPath, wholeFile},
 		{"kilocode", kilocodeConfigPath, "mcp", opencodeObject, kilocodeAgentsPath, markerBlock},
 	}
@@ -180,16 +180,38 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 	}
 }
 
-func TestCursorAndVSCodeInstructionsCarryFrontmatter(t *testing.T) {
-	stubRegistryEnv(t)
+func TestCursorMemoryProtocolHasNoFrontmatter(t *testing.T) {
+	home := stubRegistryEnv(t)
 
 	if _, err := Install("cursor"); err != nil {
 		t.Fatalf("Install(cursor): %v", err)
 	}
-	cursorRaw, _ := os.ReadFile(cursorRulesPath())
-	if !strings.Contains(string(cursorRaw), "alwaysApply: true") {
-		t.Errorf("cursor .mdc missing alwaysApply frontmatter")
+
+	// The old .mdc path must NOT exist — we no longer write a global rule file.
+	oldMDCPath := filepath.Join(home, ".cursor", "rules", "engram.mdc")
+	if _, err := os.Stat(oldMDCPath); err == nil {
+		t.Errorf("cursor: ~/.cursor/rules/engram.mdc should not be written (Cursor ignores global rule files)")
 	}
+
+	// The new informational file must exist, contain the protocol, and have no YAML frontmatter.
+	protocolRaw, err := os.ReadFile(cursorMemoryProtocolPath())
+	if err != nil {
+		t.Fatalf("cursor: memory protocol file not written at %s: %v", cursorMemoryProtocolPath(), err)
+	}
+	content := string(protocolRaw)
+	if !strings.Contains(content, "Engram Persistent Memory") {
+		t.Errorf("cursor: memory protocol file missing expected content")
+	}
+	if strings.Contains(content, "alwaysApply") {
+		t.Errorf("cursor: memory protocol file must not contain alwaysApply frontmatter")
+	}
+	if strings.HasPrefix(content, "---") {
+		t.Errorf("cursor: memory protocol file must not start with YAML frontmatter")
+	}
+}
+
+func TestVSCodeInstructionsCarryFrontmatter(t *testing.T) {
+	stubRegistryEnv(t)
 
 	if _, err := Install("vscode-copilot"); err != nil {
 		t.Fatalf("Install(vscode-copilot): %v", err)
