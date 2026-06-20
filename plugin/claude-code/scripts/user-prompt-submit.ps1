@@ -23,14 +23,57 @@ function Write-ToolSearchMessage {
   [PSCustomObject]@{ systemMessage = $message } | ConvertTo-Json -Compress
 }
 
+function Invoke-EngramPromptPersist {
+  param(
+    [string]$EngramUrl,
+    [string]$SessionId,
+    [string]$Project,
+    [string]$Prompt
+  )
+  # Fire-and-forget: never blocks and never fails the hook.
+  if ([string]::IsNullOrWhiteSpace($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId)) { return }
+  try {
+    $body = [PSCustomObject]@{
+      session_id = $SessionId
+      project    = $Project
+      content    = $Prompt
+    } | ConvertTo-Json -Compress
+    $null = Invoke-RestMethod -Method Post -Uri "$EngramUrl/prompts" `
+      -ContentType 'application/json' -Body $body -TimeoutSec 2
+  } catch { }
+}
+
 try {
+  $engramPort = if ($env:ENGRAM_PORT) { $env:ENGRAM_PORT } else { '7437' }
+  $engramUrl  = "http://127.0.0.1:$engramPort"
+
   $inputJson = [Console]::In.ReadToEnd()
   $payload = $inputJson | ConvertFrom-Json
   $sessionID = [string]($payload.session_id)
+  $prompt    = [string]($payload.prompt)
 
   if ([string]::IsNullOrWhiteSpace($sessionID)) {
     $sessionID = "windows-$PID"
   }
+
+  # Derive project from cwd git remote, falling back to directory basename.
+  $project = ''
+  try {
+    $cwd = [string]($payload.cwd)
+    if (-not [string]::IsNullOrWhiteSpace($cwd)) {
+      $remoteUrl = git -C "$cwd" remote get-url origin 2>$null
+      if ($remoteUrl) {
+        $project = ($remoteUrl -replace '\.git$', '' -replace '^.*[/:]', '').ToLower()
+      }
+      if ([string]::IsNullOrWhiteSpace($project)) {
+        $project = (Split-Path -Leaf $cwd).ToLower()
+      }
+    }
+  } catch { }
+
+  # Persist the prompt (fire-and-forget, fail-silent).
+  Invoke-EngramPromptPersist -EngramUrl $engramUrl -SessionId $sessionID `
+    -Project $project -Prompt $prompt
 
   $safeSessionID = $sessionID -replace '[^a-zA-Z0-9_-]', '_'
   $stateFile = Join-Path ([IO.Path]::GetTempPath()) "engram-claude-$safeSessionID-tools-loaded"

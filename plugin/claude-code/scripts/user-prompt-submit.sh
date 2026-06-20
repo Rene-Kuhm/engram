@@ -96,6 +96,22 @@ INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# ──────────────────────────────────────────────────────────────────────────────
+# PROMPT PERSIST
+#
+# Every user message is captured to POST /prompts so mem_save can attach the
+# originating prompt via SessionActivity.  Fire-and-forget: never blocks and
+# never fails the hook.
+# ──────────────────────────────────────────────────────────────────────────────
+PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
+if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
+  _PROMPT_PROJECT=$(detect_project "$CWD")
+  curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg s "$SESSION_ID" --arg p "${_PROMPT_PROJECT:-}" --arg c "$PROMPT" \
+          '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
+fi
+
 parse_epoch() {
   TS="$1"
   if [ -z "$TS" ]; then
