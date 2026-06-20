@@ -105,14 +105,14 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 # ──────────────────────────────────────────────────────────────────────────────
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
-  # Detached subshell so neither detect_project nor the POST can stall the hook,
-  # even if the server is slow or unreachable.
+  # Detached subshell so the POST never stalls the hook. The server derives the
+  # prompt's project from the session, so project lookup stays off the hot path
+  # here (the hook keys by session_id first and only resolves the project later).
   (
-    _PROMPT_PROJECT=$(detect_project "$CWD")
     curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg p "${_PROMPT_PROJECT:-}" --arg c "$PROMPT" \
-            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
+      -d "$(jq -n --arg s "$SESSION_ID" --arg c "$PROMPT" \
+            '{session_id:$s, content:$c}')" >/dev/null 2>&1 || true
   ) &
 fi
 

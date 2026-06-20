@@ -602,6 +602,15 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When the client omits the project, derive it from the session so the
+	// prompt is attributed correctly without the hook detecting it eagerly on
+	// every message.
+	if strings.TrimSpace(body.Project) == "" {
+		if sess, err := s.store.GetSession(body.SessionID); err == nil {
+			body.Project = sess.Project
+		}
+	}
+
 	id, err := s.store.AddPrompt(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())

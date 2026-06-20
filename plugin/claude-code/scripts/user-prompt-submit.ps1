@@ -27,16 +27,15 @@ function Invoke-EngramPromptPersist {
   param(
     [string]$EngramUrl,
     [string]$SessionId,
-    [string]$Project,
     [string]$Prompt
   )
   # Fail-silent and bounded: a short timeout keeps a slow/unreachable server
-  # from stalling prompt submission, and any error is swallowed.
+  # from stalling prompt submission, and any error is swallowed. The server
+  # derives the prompt's project from the session, so the hook sends none.
   if ([string]::IsNullOrWhiteSpace($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId)) { return }
   try {
     $body = [PSCustomObject]@{
       session_id = $SessionId
-      project    = $Project
       content    = $Prompt
     } | ConvertTo-Json -Compress
     $null = Invoke-RestMethod -Method Post -Uri "$EngramUrl/prompts" `
@@ -57,24 +56,9 @@ try {
     $sessionID = "windows-$PID"
   }
 
-  # Derive project from cwd git remote, falling back to directory basename.
-  $project = ''
-  try {
-    $cwd = [string]($payload.cwd)
-    if (-not [string]::IsNullOrWhiteSpace($cwd)) {
-      $remoteUrl = git -C "$cwd" remote get-url origin 2>$null
-      if ($remoteUrl) {
-        $project = ($remoteUrl -replace '\.git$', '' -replace '^.*[/:]', '').ToLower()
-      }
-      if ([string]::IsNullOrWhiteSpace($project)) {
-        $project = (Split-Path -Leaf $cwd).ToLower()
-      }
-    }
-  } catch { }
-
-  # Persist the prompt (fire-and-forget, fail-silent).
-  Invoke-EngramPromptPersist -EngramUrl $engramUrl -SessionId $sessionID `
-    -Project $project -Prompt $prompt
+  # Persist the prompt (fire-and-forget, fail-silent). The server derives the
+  # project from the session, so the hook does not detect it here.
+  Invoke-EngramPromptPersist -EngramUrl $engramUrl -SessionId $sessionID -Prompt $prompt
 
   $safeSessionID = $sessionID -replace '[^a-zA-Z0-9_-]', '_'
   $stateFile = Join-Path ([IO.Path]::GetTempPath()) "engram-claude-$safeSessionID-tools-loaded"
