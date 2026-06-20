@@ -49,13 +49,15 @@ func agentAdapters() []agentAdapter {
 		},
 		{
 			slug:        "codex",
-			description: "Codex — MCP registration plus model/compaction instruction files",
+			description: "Codex — MCP registration, model/compaction instruction files, and plugin (hooks)",
 			custom:      installCodex,
 			installDir:  codexConfigPath,
 			postInstall: []string{
-				"Restart Codex so MCP config is reloaded",
+				"Restart Codex so MCP config and plugin are reloaded",
 				"Verify ~/.codex/config.toml has [mcp_servers.engram]",
 				"Verify model_instructions_file + experimental_compact_prompt_file are set",
+				"Verify plugin is installed with: codex plugin list",
+				"If codex CLI was absent during setup, install manually: codex plugin marketplace add Gentleman-Programming/engram --ref main && codex plugin add engram@engram",
 			},
 		},
 		{
