@@ -57,8 +57,11 @@ The package has two paths:
 Use an existing Engram HTTP server:
 
 ```bash
+# Set ENGRAM_URL before launching the Pi agent CLI ("pi" is the command, not part of the URL)
 ENGRAM_URL=http://127.0.0.1:7437 pi
 ```
+
+`ENGRAM_URL` tells the `gentle-engram` Pi extension to use an already-running `engram serve` instance instead of auto-starting one. This is standard shell syntax: `KEY=value command`. The URL is the HTTP REST API base; it is not an MCP endpoint.
 
 Use a custom Engram binary for MCP tools and local auto-start:
 
@@ -618,6 +621,8 @@ The pattern is always the same — point your agent's MCP config to `engram mcp`
 
 ## Surviving Compaction (Recommended)
 
+> **Is this step required?** No — `engram setup` handles all the MCP wiring. These snippets are an optional resilience layer. Add them if your agent forgets about Engram after long sessions or context resets. They are especially useful for agents that do not have a full plugin (VS Code, Cursor, Windsurf, Antigravity) and have no automated session tracking.
+
 When your agent compacts (summarizes long conversations to free context), it starts fresh — and might forget about Engram. To make memory truly resilient, add this to your agent's system prompt or config file:
 
 **For Claude Code** (`CLAUDE.md`):
@@ -691,7 +696,7 @@ You have access to Engram persistent memory (mem_save, mem_search, mem_context).
 Save proactively after significant work. After context resets, call mem_context to recover state.
 ```
 
-This is the **nuclear option** — system prompts survive everything, including compaction.
+This is the **nuclear option** — system prompts survive everything, including compaction. Use it when you want guaranteed agent behavior without relying on plugin hooks. It is optional for agents that have a full plugin (Claude Code, OpenCode, Gemini CLI, Codex) and required for agents that do not (VS Code, Cursor, Windsurf, Antigravity).
 
 ---
 
