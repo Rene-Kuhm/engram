@@ -95,7 +95,7 @@ Engram's MCP transport is **stdio only** — there is no HTTP or network MCP end
 
 If you have agents running in Docker that need to write to Engram on the host, the available paths are:
 
-- **HTTP REST API** (`engram serve`): the HTTP server at `http://host:7437` is reachable from Docker with standard networking. This is what `ENGRAM_URL` is for — it points Pi and OpenCode plugins at an existing `engram serve` instance (possibly on a different host or port). Example: `ENGRAM_URL=http://host.docker.internal:7437 pi` tells the Pi extension to use the host's Engram server. The HTTP API is not the MCP protocol, but Pi and OpenCode use it for session capture and Pi-native `mem_*` tools.
+- **HTTP REST API** (`engram serve`): note that `engram serve` currently binds to `127.0.0.1` only, so it is **not** reachable from inside a container out of the box — a container cannot reach the host's loopback, and there is no bind-address flag yet. `ENGRAM_URL` lets the **Pi plugin** target an `engram serve` reachable on a routable host/port (e.g. `ENGRAM_URL=http://host.docker.internal:7437 pi`), but that only works once the server listens on a non-loopback interface, which is not supported today. The HTTP API is not the MCP protocol; Pi uses it for session capture and Pi-native `mem_*` tools. For Docker right now, prefer the stdio path below.
 - **Stdio MCP** (mount the binary): the cleanest path for a Dockerized agent that needs MCP tools is to mount the `engram` binary into the container and let the agent launch `engram mcp` locally via stdio, pointing `ENGRAM_DATA_DIR` at a volume shared with the host.
 
 Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#environment-variables)
@@ -363,7 +363,7 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                | `~/.engram`    |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                              | `7437`         |
-| `ENGRAM_URL`                    | Point Pi and OpenCode plugins at an existing `engram serve` instance instead of auto-starting one (e.g. `http://host.docker.internal:7437`). Not an MCP endpoint — used by the HTTP event-capture path only. | (unset, defaults to `http://127.0.0.1:<ENGRAM_PORT>`) |
+| `ENGRAM_URL`                    | Point the **Pi plugin** at an existing `engram serve` instance instead of auto-starting one. Not an MCP endpoint — used by the HTTP event-capture path only. (The OpenCode plugin honors `ENGRAM_PORT`/`ENGRAM_BIN`, not `ENGRAM_URL`.) | (unset, defaults to `http://127.0.0.1:<ENGRAM_PORT>`) |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for local HTTP server. When set, destructive and export routes require `Authorization: Bearer <token>`. Unset = open (zero-config default). | (unset) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid. | system local |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync (also requires `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_SERVER`).                 | (unset)        |
