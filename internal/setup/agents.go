@@ -249,14 +249,14 @@ func vscodeUserDir() string {
 	home, _ := userHome()
 	switch runtimeGOOS {
 	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
+		if appData := os.Getenv("APPDATA"); appData != "" && filepath.IsAbs(appData) {
 			return filepath.Join(appData, "Code", "User")
 		}
 		return filepath.Join(home, "AppData", "Roaming", "Code", "User")
 	case "darwin":
 		return filepath.Join(home, "Library", "Application Support", "Code", "User")
 	default:
-		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 			return filepath.Join(xdg, "Code", "User")
 		}
 		return filepath.Join(home, ".config", "Code", "User")
@@ -278,7 +278,7 @@ func vscodePromptPath() string {
 
 func kilocodeConfigDir() string {
 	home, _ := userHome()
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "kilo")
 	}
 	return filepath.Join(home, ".config", "kilo")

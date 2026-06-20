@@ -263,6 +263,41 @@ func TestUpsertMarkerBlockPreservesUserContentAndReplaces(t *testing.T) {
 	}
 }
 
+// TestUpsertMarkerBlockStrayEndMarkerStaysIdempotent guards the anchored end
+// search: a stray end marker in user content ABOVE the managed block must not
+// defeat idempotency (an unanchored search would find it and append a duplicate).
+func TestUpsertMarkerBlockStrayEndMarkerStaysIdempotent(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	path := filepath.Join(home, "notes.md")
+	seed := "# My notes\n\n" + engramMarkerEnd + "\n\nkeep me\n"
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := upsertMarkerBlock(path, engramMarkerBegin, engramMarkerEnd, "BODY ONE"); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if err := upsertMarkerBlock(path, engramMarkerBegin, engramMarkerEnd, "BODY TWO"); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	text := string(raw)
+	if !strings.Contains(text, "keep me") {
+		t.Errorf("user content not preserved: %q", text)
+	}
+	if strings.Contains(text, "BODY ONE") {
+		t.Errorf("stale managed block not replaced: %q", text)
+	}
+	if !strings.Contains(text, "BODY TWO") {
+		t.Errorf("new managed block missing: %q", text)
+	}
+	if n := strings.Count(text, engramMarkerBegin); n != 1 {
+		t.Errorf("expected exactly 1 managed block despite stray end marker, got %d: %q", n, text)
+	}
+}
+
 func TestInstallDeclarativeAgentMCPWriteError(t *testing.T) {
 	stubRegistryEnv(t)
 	writeFileFn = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
@@ -341,4 +376,31 @@ func TestVSCodeUserDirPerPlatform(t *testing.T) {
 			t.Errorf("vscodeUserDir(%s) = %q, want %q", goos, got, want)
 		}
 	}
+}
+
+// TestConfigDirsIgnoreRelativeConfigHome verifies a relative XDG_CONFIG_HOME /
+// APPDATA is ignored (falling back to the absolute home path) instead of
+// resolving config under the current working directory.
+func TestConfigDirsIgnoreRelativeConfigHome(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+
+	t.Run("relative XDG_CONFIG_HOME ignored", func(t *testing.T) {
+		runtimeGOOS = "linux"
+		t.Setenv("XDG_CONFIG_HOME", "relative/xdg")
+		if got, want := vscodeUserDir(), filepath.Join(home, ".config", "Code", "User"); got != want {
+			t.Errorf("vscodeUserDir with relative XDG = %q, want %q", got, want)
+		}
+		if got, want := kilocodeConfigDir(), filepath.Join(home, ".config", "kilo"); got != want {
+			t.Errorf("kilocodeConfigDir with relative XDG = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("relative APPDATA ignored", func(t *testing.T) {
+		runtimeGOOS = "windows"
+		t.Setenv("APPDATA", "relative/appdata")
+		if got, want := vscodeUserDir(), filepath.Join(home, "AppData", "Roaming", "Code", "User"); got != want {
+			t.Errorf("vscodeUserDir with relative APPDATA = %q, want %q", got, want)
+		}
+	})
 }

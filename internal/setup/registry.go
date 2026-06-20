@@ -197,9 +197,16 @@ func upsertMarkerBlock(path, begin, end, body string) error {
 
 	text := strings.ReplaceAll(string(existing), "\r\n", "\n")
 	start := strings.Index(text, begin)
-	stop := strings.Index(text, end)
-	if start != -1 && stop != -1 && stop > start {
-		stop += len(end)
+	// Search for the end marker only AFTER the begin marker, so a stray end
+	// marker in user content above the managed block can't defeat idempotency
+	// (which would otherwise append a second block).
+	stop := -1
+	if start != -1 {
+		if rel := strings.Index(text[start:], end); rel != -1 {
+			stop = start + rel + len(end)
+		}
+	}
+	if start != -1 && stop != -1 {
 		text = text[:start] + strings.TrimRight(block, "\n") + text[stop:]
 	} else {
 		text = strings.TrimRight(text, "\n") + "\n\n" + block
