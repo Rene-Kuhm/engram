@@ -27,17 +27,55 @@ func mustDefaultConfig(t *testing.T) Config {
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	cfg := mustDefaultConfig(t)
-	cfg.DataDir = t.TempDir()
+	// os.MkdirTemp (not t.TempDir) so we own the lifecycle; avoids racing with
+	// the testing framework's auto-RemoveAll on Windows SQLite teardown.
+	dir, err := os.MkdirTemp("", "engram-test-")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	cfg.DataDir = dir
 	cfg.DedupeWindow = time.Hour
 
 	s, err := New(cfg)
 	if err != nil {
+		_ = os.RemoveAll(dir)
 		t.Fatalf("new store: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = s.Close()
-	})
+	t.Cleanup(func() { closeAndRemoveStore(t, dir, s) })
 	return s
+}
+
+// closeAndRemoveStore closes the store and best-effort removes its data dir
+// with a retry. This is a Windows SQLite teardown mitigation: even after
+// db.Close(), SQLite may retain the file handle for a noticeable window on
+// Windows, causing the testing framework's auto-TempDir RemoveAll to fail
+// with "file being used by another process". Running our own RemoveAll with
+// retry BEFORE the framework's auto-cleanup (LIFO) makes the framework's
+// call a no-op and the test passes deterministically.
+func closeAndRemoveStore(t *testing.T, dir string, s *Store) {
+	t.Helper()
+	if s != nil {
+		_ = s.Close()
+	}
+	for i := 0; i < 100; i++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("closeAndRemoveStore: best-effort RemoveAll(%q) failed after retries; framework auto-cleanup may also fail", dir)
+}
+
+// removeDirWithRetry best-effort removes a directory with a retry.
+// Used by tests that open raw SQLite handles (not via Store) but still need
+// the Windows teardown-race mitigation.
+func removeDirWithRetry(dir string) {
+	for i := 0; i < 100; i++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 type fakeRows struct {
@@ -3566,7 +3604,11 @@ func TestNewErrorBranches(t *testing.T) {
 	})
 
 	t.Run("fails when migration encounters conflicting object", func(t *testing.T) {
-		dataDir := t.TempDir()
+		// os.MkdirTemp (not t.TempDir) — see closeAndRemoveStore.
+		dataDir, err := os.MkdirTemp("", "engram-mig-conflict-test-")
+		if err != nil {
+			t.Fatalf("mkdir temp: %v", err)
+		}
 		dbPath := filepath.Join(dataDir, "engram.db")
 
 		db, err := sql.Open("sqlite", dbPath)
@@ -3591,11 +3633,19 @@ func TestNewErrorBranches(t *testing.T) {
 		`)
 		if err != nil {
 			_ = db.Close()
+			removeDirWithRetry(dataDir)
 			t.Fatalf("create conflicting view: %v", err)
 		}
 		if err := db.Close(); err != nil {
+			removeDirWithRetry(dataDir)
 			t.Fatalf("close db: %v", err)
 		}
+		// Windows SQLite teardown race: register a cleanup that retries
+		// RemoveAll on the data dir before the framework's auto-cleanup runs.
+		t.Cleanup(func() {
+			_ = db.Close() // idempotent; ensure release even if path above bailed early
+			removeDirWithRetry(dataDir)
+		})
 
 		cfg := mustDefaultConfig(t)
 		cfg.DataDir = dataDir
@@ -7344,16 +7394,20 @@ func TestReadSQLiteLockSnapshotDoesNotMutateApplicationRows(t *testing.T) {
 func newTestStoreRaw(t *testing.T) *Store {
 	t.Helper()
 	cfg := mustDefaultConfig(t)
-	cfg.DataDir = t.TempDir()
+	// os.MkdirTemp (not t.TempDir) — see newTestStore.
+	dir, err := os.MkdirTemp("", "engram-test-raw-")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	cfg.DataDir = dir
 	cfg.DedupeWindow = time.Hour
 
 	s, err := newWithoutRepair(cfg)
 	if err != nil {
+		_ = os.RemoveAll(dir)
 		t.Fatalf("new raw store: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = s.Close()
-	})
+	t.Cleanup(func() { closeAndRemoveStore(t, dir, s) })
 	return s
 }
 
