@@ -168,4 +168,26 @@ var (
 	// ErrInvalidRole is returned by SaveTurn when role is not one of
 	// user, assistant, tool, system (REQ-001).
 	ErrInvalidRole = errors.New("session_turns: role must be one of user|assistant|tool|system")
+
+	// ErrCrossProjectFork is returned by ForkSession when the target
+	// turn's project does not match the caller's project (REQ-012 /
+	// locked-in decision Q5). Cross-project forks are forbidden.
+	ErrCrossProjectFork = errors.New("session_turns: fork from a different project is not allowed")
+
+	// ErrTargetTurnNotFound is returned by ForkSession / RewindSession
+	// when the requested at_turn_id / parent_turn_id does not exist in
+	// the database. Callers must surface this as a 4xx, not a 5xx.
+	ErrTargetTurnNotFound = errors.New("session_turns: target turn not found")
+
+	// ErrEmptySession is returned by ForkSession / RewindSession when
+	// the source session has no turns to clone. Defensive: a target turn
+	// existing implies the session has at least one turn, so this fires
+	// only on data-integrity edge cases (e.g., broken parent chain).
+	ErrEmptySession = errors.New("session_turns: cannot fork from an empty session")
+
+	// ErrInvalidRewindMode is returned by RewindSession when the Mode
+	// field is set to a value other than "branch" or "truncate", OR
+	// when Mode is "truncate" in PR2 (truncate is reserved for PR4 per
+	// locked-in decision Q6).
+	ErrInvalidRewindMode = errors.New("session_turns: rewind mode must be 'branch' or 'truncate'")
 )
