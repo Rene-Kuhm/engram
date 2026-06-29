@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +32,11 @@ type legacyObsRow struct {
 func newTestStoreWithLegacySchema(t *testing.T, fixtureRows []legacyObsRow) *Store {
 	t.Helper()
 
-	dir := t.TempDir()
+	// os.MkdirTemp (not t.TempDir) — see closeAndRemoveStore in store_test.go.
+	dir, err := os.MkdirTemp("", "engram-legacy-test-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
 	dbPath := filepath.Join(dir, "engram.db")
 
 	// 1. Open raw DB and apply legacy DDL.
@@ -85,9 +90,10 @@ func newTestStoreWithLegacySchema(t *testing.T, fixtureRows []legacyObsRow) *Sto
 
 	s, err := New(cfg)
 	if err != nil {
+		removeDirWithRetry(dir)
 		t.Fatalf("newTestStoreWithLegacySchema: New(cfg): %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
+	t.Cleanup(func() { closeAndRemoveStore(t, dir, s) })
 
 	return s
 }
