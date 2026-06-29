@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
+	"time"
 )
 
 // ─── RewindSession ──────────────────────────────────────────────────────────
@@ -29,13 +33,15 @@ const (
 // RewindSessionParams is the input shape for RewindSession. Mode defaults
 // to RewindModeBranch when empty (Q6). FromProject is the caller's
 // current project context — used by the embedded ForkService call to
-// enforce REQ-012 cross-project rejection.
+// enforce REQ-012 cross-project rejection. AgentName is optional and is
+// only emitted in the truncate-mode audit log line (Risk #2 mitigation).
 type RewindSessionParams struct {
 	SessionID       string
 	AtTurnID        string
 	Mode            RewindMode
 	ConfirmTruncate bool
 	FromProject     string
+	AgentName       *string
 }
 
 // RewindResult captures the outcome of a RewindSession call. The fields
@@ -81,12 +87,7 @@ func (s *Store) RewindSession(ctx context.Context, params RewindSessionParams) (
 	case RewindModeBranch:
 		return s.rewindBranch(ctx, params)
 	case RewindModeTruncate:
-		// PR2 stub: truncate mode is reserved for PR4 per the locked-in
-		// decision Q6. Returning ErrInvalidRewindMode here keeps the
-		// contract that no destructive operation can fire without the
-		// caller being explicit, even when the explicit mode value is
-		// the one we haven't implemented yet.
-		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: truncate mode not implemented in PR2 (reserved for PR4): %w", ErrInvalidRewindMode)
+		return s.rewindTruncate(ctx, params)
 	default:
 		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: unknown mode %q: %w", mode, ErrInvalidRewindMode)
 	}
@@ -169,4 +170,181 @@ func encodeMetadata(meta map[string]any) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// ─── Truncate mode (PR4 / REQ-007 / REQ-011 / Risk #2) ───────────────────────
+//
+// rewindTruncate implements the soft-delete path: descendants of
+// params.AtTurnID in params.SessionID are marked via metadata flags so
+// they can be recovered / re-forked, but rows remain on disk. The
+// target turn itself is NOT truncated (the user can still see and
+// reference it).
+//
+// Contract (locked-in decision Q6 / REQ-011):
+//   - Caller MUST pass ConfirmTruncate=true. ErrTruncateRequiresConfirmation
+//     otherwise. No rows are touched on rejection.
+//   - Failures are LOUD: every successful truncate emits a single
+//     logfmt-style audit line that includes session_id, at_turn_id,
+//     agent_name (when set), and a unix_ms timestamp. This is the
+//     durability for Risk #2 (HIGH-SEVERITY operation auditability).
+//
+// Persistence shape:
+//   - For each descendant turn, the existing metadata_json is read,
+//     keys truncated_at_turn_id / truncated_from_session_id /
+//     truncated_at are merged in (overwriting any prior values so the
+//     call is idempotent on retry), and the row is UPDATEd. Rows are
+//     never DELETEd by this path; recovery happens via RecoverTruncated
+//     + ForkSession.
+func (s *Store) rewindTruncate(ctx context.Context, params RewindSessionParams) (RewindResult, error) {
+	if params.SessionID == "" {
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: session_id is required")
+	}
+	if params.AtTurnID == "" {
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: %w", ErrTargetTurnNotFound)
+	}
+	if params.FromProject == "" {
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: %w", ErrProjectRequired)
+	}
+
+	// Lock-in Q6 / REQ-011 gate. This MUST be the first non-validation
+	// check: anything we touch below here becomes a destructive
+	// operation, and we want the rejection to fire before any UPDATE.
+	if !params.ConfirmTruncate {
+		return RewindResult{}, ErrTruncateRequiresConfirmation
+	}
+
+	// Look up the target turn's session_id and project BEFORE the
+	// descendants walk: we must reject cross-project target mismatches
+	// (REQ-012) and confirm the target exists (ErrTargetTurnNotFound)
+	// before any UPDATE.
+	var (
+		targetSession, targetProject string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT session_id, project FROM session_turns WHERE id = ?`,
+		params.AtTurnID,
+	).Scan(&targetSession, &targetProject)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RewindResult{}, fmt.Errorf("session_turns: RewindSession: %w", ErrTargetTurnNotFound)
+		}
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: lookup target: %w", err)
+	}
+
+	// Cross-project guard mirrors ForkSession (REQ-012). The CLI does
+	// not expose enough to actually trip this in practice — FromProject
+	// is always the caller's auto-detected project — but enforcing the
+	// guard here makes the API safe for future call paths (MCP,
+	// programmatic) where the contract matters.
+	if targetProject != params.FromProject {
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: target project %q != caller project %q: %w",
+			targetProject, params.FromProject, ErrCrossProjectFork)
+	}
+
+	// Walk descendants of AtTurnID inside targetSession. The walk is
+	// bounded by the session's row count for termination guarantees.
+	descendants, err := s.truncateDescendants(ctx, params.AtTurnID, targetSession)
+	if err != nil {
+		return RewindResult{}, err
+	}
+
+	// Soft-delete each descendant by stamping metadata flags. One
+	// transaction so partial truncate is impossible.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: begin tx: %w", err)
+	}
+	now := time.Now().UnixMilli()
+	rolledBack := false
+	defer func() {
+		if rolledBack || err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, d := range descendants {
+		merged := d.Metadata
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		// Overwrite prior markers so the call is idempotent on retry.
+		merged["truncated_at_turn_id"] = params.AtTurnID
+		merged["truncated_from_session_id"] = params.SessionID
+		merged["truncated_at"] = now
+		metaBytes, mErr := encodeMetadata(merged)
+		if mErr != nil {
+			err = fmt.Errorf("session_turns: RewindSession: marshal descendant %s metadata: %w", d.ID, mErr)
+			rolledBack = true
+			return RewindResult{}, err
+		}
+		if _, execErr := tx.ExecContext(ctx,
+			`UPDATE session_turns SET metadata_json = ? WHERE id = ?`,
+			metaBytes, d.ID,
+		); execErr != nil {
+			err = fmt.Errorf("session_turns: RewindSession: update descendant %s: %w", d.ID, execErr)
+			rolledBack = true
+			return RewindResult{}, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return RewindResult{}, fmt.Errorf("session_turns: RewindSession: commit: %w", err)
+	}
+
+	// Risk #2 mitigation: a successful truncate is HIGH-SEVERITY and
+	// MUST be visible in store-level logging. Single line, logfmt-style,
+	// so log-collectors key-value parsers can index every field.
+	agentField := "<none>"
+	if params.AgentName != nil && strings.TrimSpace(*params.AgentName) != "" {
+		agentField = *params.AgentName
+	}
+	log.Printf("[store] audit: rewind truncate mode_session_id=%s at_turn_id=%s agent_name=%s soft_deleted_count=%d unix_ms=%d",
+		params.SessionID, params.AtTurnID, agentField, len(descendants), now)
+
+	return RewindResult{SoftDeletedCount: len(descendants)}, nil
+}
+
+// truncateDescendants returns every turn descendant of atTurnID
+// (excluding the turn itself), bounded by the session row count for
+// termination. Read-only — used by rewindTruncate (pre-UPDATE scan) and
+// by RecoverTruncated (post-truncate enumeration).
+func (s *Store) truncateDescendants(ctx context.Context, atTurnID, sessionID string) ([]Turn, error) {
+	var rowCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_turns WHERE session_id = ?`, sessionID,
+	).Scan(&rowCount); err != nil {
+		return nil, fmt.Errorf("session_turns: rewindTruncate descendant count: %w", err)
+	}
+	cte := fmt.Sprintf(`
+		WITH RECURSIVE subtree(id, depth) AS (
+			SELECT id, 0 FROM session_turns WHERE id = ?
+			UNION ALL
+			SELECT t.id, s.depth + 1
+			FROM session_turns t JOIN subtree s ON t.parent_turn_id = s.id
+			WHERE s.depth < %d
+		)
+		SELECT t.id, t.session_id, t.project, t.parent_turn_id, t.turn_seq, t.role,
+		       t.content_json, t.agent_name, t.tokens_in, t.tokens_out,
+		       t.created_at, t.metadata_json
+		FROM session_turns t JOIN subtree s ON t.id = s.id
+		WHERE t.id != ?
+		  AND t.session_id = ?
+		ORDER BY t.turn_seq ASC
+	`, rowCount+1)
+	rows, err := s.db.QueryContext(ctx, cte, atTurnID, atTurnID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session_turns: rewindTruncate walk: %w", err)
+	}
+	defer rows.Close()
+	var out []Turn
+	for rows.Next() {
+		turn, scanErr := scanTurnRow(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, turn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("session_turns: rewindTruncate rows: %w", err)
+	}
+	return out, nil
 }
