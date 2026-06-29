@@ -35,6 +35,8 @@ func resetSetupSeams(t *testing.T) {
 	oldOsExecutable := osExecutable
 	oldWriteClaudeCodeUserMCPFn := writeClaudeCodeUserMCPFn
 	oldResolveMiseNodeVersionFn := resolveMiseNodeVersionFn
+	oldGeminiConfigPathFn := geminiConfigPathFn
+	oldCodexConfigPathFn := codexConfigPathFn
 
 	t.Cleanup(func() {
 		runtimeGOOS = oldRuntimeGOOS
@@ -59,6 +61,8 @@ func resetSetupSeams(t *testing.T) {
 		osExecutable = oldOsExecutable
 		writeClaudeCodeUserMCPFn = oldWriteClaudeCodeUserMCPFn
 		resolveMiseNodeVersionFn = oldResolveMiseNodeVersionFn
+		geminiConfigPathFn = oldGeminiConfigPathFn
+		codexConfigPathFn = oldCodexConfigPathFn
 	})
 }
 
@@ -92,8 +96,16 @@ func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
 }
 
 func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
+	resetSetupSeams(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+
+	// Pin install paths to test tempdir via seam override (REQ-A-0: HOME env is
+	// silently ignored on Windows by geminiConfigPath → %APPDATA%). The seam
+	// default-delegates to the original function so production behavior is
+	// unchanged on real user machines; resetSetupSeams restores it via
+	// t.Cleanup after this test.
+	geminiConfigPathFn = func() string { return filepath.Join(home, ".gemini", "settings.json") }
 
 	configPath := filepath.Join(home, ".gemini", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -363,6 +375,13 @@ func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 	resetSetupSeams(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+
+	// Pin install paths to test tempdir via seam override (REQ-A-0: HOME env is
+	// silently ignored on Windows by codexConfigPath → %APPDATA%). The seam
+	// default-delegates to the original function so production behavior is
+	// unchanged on real user machines; resetSetupSeams restores it via
+	// t.Cleanup after this test.
+	codexConfigPathFn = func() string { return filepath.Join(home, ".codex", "config.toml") }
 
 	lookPathFn = func(file string) (string, error) {
 		return "", errors.New("not found")

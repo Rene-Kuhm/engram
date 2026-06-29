@@ -27,6 +27,32 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 )
 
+// ─── Install-path seams (REQ-A-0) ────────────────────────────────────────────
+//
+// REQ-A-0 root cause: geminiConfigPath() and codexConfigPath() resolve to
+// %APPDATA% on Windows (os.Getenv("APPDATA") at setup.go:1344 / :1366),
+// NOT to userHomeDir(). On Windows, t.Setenv("HOME", ...) is silently
+// ignored because os.UserHomeDir() consults USERPROFILE, not HOME. This
+// made TestInstallGeminiCLIInjectsMCPConfig, TestInstallCodexInjectsTOMLAndIsIdempotent,
+// and TestInstallCodexPluginCLIAbsent exercise the install code path against
+// the user's real %APPDATA% while their assertions read from t.TempDir() — a
+// path-mismatch that produced type-assertion failures and (per Engram #387)
+// silently polluted user-machine state during early reproductions.
+//
+// The seams `geminiConfigPathFn` and `codexConfigPathFn` below default to the
+// current platform-resolution functions, preserving production behavior on
+// real user machines. Tests override them with `func() string { return
+// filepath.Join(tempHome, ".gemini"/".codex", "...") }` so install behavior is
+// exercised against a tempdir without ever touching the user's %APPDATA%.
+//
+// IMPORTANT: any future test code that needs to drive install-path resolution
+// MUST override the seams (or call useTestHome + clear APPDATA/USERPROFILE
+// explicitly). NEVER rely on t.Setenv("HOME", ...) alone — see Engram #384
+// for the confirmed Windows behavior. The follow-up at Engram #395 (cmdExport
+// error contract) is unrelated and tracked separately.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 var (
 	runtimeGOOS  = runtime.GOOS
 	userHomeDir  = os.UserHomeDir
@@ -58,6 +84,17 @@ var (
 	// It runs "mise current node" and returns the result as a "node@X.Y.Z" specifier.
 	// Returns an empty string when the version cannot be determined.
 	resolveMiseNodeVersionFn = resolveMiseNodeVersion
+
+	// geminiConfigPathFn is a seam for test-driven install paths. The default
+	// delegates to geminiConfigPath so production behavior is unchanged on real
+	// user machines (resolves %APPDATA% on Windows via geminiConfigPath). Tests
+	// override it to redirect the install path to t.TempDir() — see REQ-A-0
+	// root cause (Engram #384) for why t.Setenv("HOME", ...) is insufficient on
+	// Windows.
+	geminiConfigPathFn = geminiConfigPath
+
+	// codexConfigPathFn mirrors geminiConfigPathFn for codex install paths.
+	codexConfigPathFn = codexConfigPath
 )
 
 //go:embed plugins/opencode/*
@@ -978,7 +1015,7 @@ func AddClaudeCodeAllowlist() error {
 // ─── Gemini CLI ──────────────────────────────────────────────────────────────
 
 func installGeminiCLI() (*Result, error) {
-	path := geminiConfigPath()
+	path := geminiConfigPathFn()
 	if err := injectGeminiMCPFn(path); err != nil {
 		return nil, err
 	}
@@ -1155,7 +1192,7 @@ func removeGeminiEnvOverride() {
 // ─── Codex ───────────────────────────────────────────────────────────────────
 
 func installCodex() (*Result, error) {
-	path := codexConfigPath()
+	path := codexConfigPathFn()
 
 	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
@@ -1351,11 +1388,11 @@ func geminiConfigPath() string {
 }
 
 func geminiSystemPromptPath() string {
-	return filepath.Join(filepath.Dir(geminiConfigPath()), "system.md")
+	return filepath.Join(filepath.Dir(geminiConfigPathFn()), "system.md")
 }
 
 func geminiEnvPath() string {
-	return filepath.Join(filepath.Dir(geminiConfigPath()), ".env")
+	return filepath.Join(filepath.Dir(geminiConfigPathFn()), ".env")
 }
 
 func codexConfigPath() string {
@@ -1373,9 +1410,9 @@ func codexConfigPath() string {
 }
 
 func codexInstructionsPath() string {
-	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-instructions.md")
+	return filepath.Join(filepath.Dir(codexConfigPathFn()), "engram-instructions.md")
 }
 
 func codexCompactPromptPath() string {
-	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-compact-prompt.md")
+	return filepath.Join(filepath.Dir(codexConfigPathFn()), "engram-compact-prompt.md")
 }
