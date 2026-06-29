@@ -35,6 +35,8 @@ func resetSetupSeams(t *testing.T) {
 	oldOsExecutable := osExecutable
 	oldWriteClaudeCodeUserMCPFn := writeClaudeCodeUserMCPFn
 	oldResolveMiseNodeVersionFn := resolveMiseNodeVersionFn
+	oldGeminiConfigPathFn := geminiConfigPathFn
+	oldCodexConfigPathFn := codexConfigPathFn
 
 	t.Cleanup(func() {
 		runtimeGOOS = oldRuntimeGOOS
@@ -59,6 +61,8 @@ func resetSetupSeams(t *testing.T) {
 		osExecutable = oldOsExecutable
 		writeClaudeCodeUserMCPFn = oldWriteClaudeCodeUserMCPFn
 		resolveMiseNodeVersionFn = oldResolveMiseNodeVersionFn
+		geminiConfigPathFn = oldGeminiConfigPathFn
+		codexConfigPathFn = oldCodexConfigPathFn
 	})
 }
 
