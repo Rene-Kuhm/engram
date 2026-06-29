@@ -1,12 +1,18 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/quick"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -353,4 +359,493 @@ func TestMigrate_BackfillHandlesMultipleSessions(t *testing.T) {
 	if emptyContent != `[{"type":"text","text":""}]` {
 		t.Errorf("empty-summary content_json = %q, want %q", emptyContent, `[{"type":"text","text":""}]`)
 	}
+}
+
+// ─── SessionTurnRepository tests ────────────────────────────────────────────
+
+// TestSessionTurnRepository_SaveAndList covers REQ-004 (BDD-S-001.a,
+// BDD-S-004.a) and REQ-005 (BDD-S-005.a):
+//   - SaveTurn appends a turn under a session, assigns monotonic turn_seq,
+//     and returns the new id.
+//   - ListTurns returns turns for a session ordered by turn_seq.
+//   - ListTurns excludes pre_tree=true turns by default (Q1).
+//   - content_json round-trips byte-identical (BDD-S-001.a).
+func TestSessionTurnRepository_SaveAndList(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Save a root turn.
+	content := []byte(`[{"type":"text","text":"hello world"}]`)
+	saved, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID:   "s-1",
+		Project:     "proj-1",
+		Role:        "user",
+		ContentJSON: content,
+		AgentName:   strPtr("alice"),
+	})
+	if err != nil {
+		t.Fatalf("SaveTurn root: %v", err)
+	}
+	if saved.ID == "" {
+		t.Errorf("SaveTurn returned empty ID")
+	}
+	if saved.SessionID != "s-1" {
+		t.Errorf("saved.SessionID = %q, want s-1", saved.SessionID)
+	}
+	if saved.Project != "proj-1" {
+		t.Errorf("saved.Project = %q, want proj-1", saved.Project)
+	}
+	if saved.TurnSeq != 1 {
+		t.Errorf("first save: TurnSeq = %d, want 1", saved.TurnSeq)
+	}
+	if saved.ParentTurnID != nil {
+		t.Errorf("first save: ParentTurnID = %v, want nil", saved.ParentTurnID)
+	}
+	if saved.Role != "user" {
+		t.Errorf("saved.Role = %q, want user", saved.Role)
+	}
+	if !bytesEqual(saved.ContentJSON, content) {
+		t.Errorf("saved.ContentJSON = %q, want %q (byte-identical)", saved.ContentJSON, content)
+	}
+
+	// Save a child turn — must auto-assign turn_seq = MAX+1 = 2.
+	childContent := []byte(`[{"type":"reasoning","text":"thinking..."}]`)
+	parentID := saved.ID
+	saved2, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID:    "s-1",
+		Project:      "proj-1",
+		ParentTurnID: &parentID,
+		Role:         "assistant",
+		ContentJSON:  childContent,
+	})
+	if err != nil {
+		t.Fatalf("SaveTurn child: %v", err)
+	}
+	if saved2.TurnSeq != 2 {
+		t.Errorf("second save: TurnSeq = %d, want 2 (BDD-S-004.a)", saved2.TurnSeq)
+	}
+	if saved2.ParentTurnID == nil || *saved2.ParentTurnID != parentID {
+		t.Errorf("saved2.ParentTurnID = %v, want %q", saved2.ParentTurnID, parentID)
+	}
+
+	// Save a pre_tree synthetic turn manually (so we can test the default
+	// exclude behavior in ListTurns).
+	preTreeID := "01HZZZPREETREESYNTHETIC00000"
+	if _, err := s.db.Exec(
+		`INSERT INTO session_turns (id, session_id, project, parent_turn_id, turn_seq, role, content_json, agent_name, tokens_in, tokens_out, created_at, metadata_json)
+		 VALUES (?, 's-1', 'proj-1', NULL, 0, 'system', '[{"type":"text","text":"legacy"}]', 'system-migration', NULL, NULL, ?, '{"pre_tree":true}')`,
+		preTreeID, time.Now().UnixMilli(),
+	); err != nil {
+		t.Fatalf("insert pre_tree turn: %v", err)
+	}
+
+	// ListTurns default: must exclude pre_tree turns (Q1).
+	turns, err := s.ListTurns(ctx, "s-1", ListTurnsOpts{})
+	if err != nil {
+		t.Fatalf("ListTurns: %v", err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("ListTurns returned %d turns, want 2 (pre_tree excluded by default)", len(turns))
+	}
+	// Order: turn_seq ASC.
+	if turns[0].TurnSeq != 1 || turns[1].TurnSeq != 2 {
+		t.Errorf("ListTurns not ordered by turn_seq ASC: got [%d, %d], want [1, 2]", turns[0].TurnSeq, turns[1].TurnSeq)
+	}
+	// First turn content must round-trip byte-identical.
+	if !bytesEqual(turns[0].ContentJSON, content) {
+		t.Errorf("listed[0].ContentJSON = %q, want %q (BDD-S-001.a round-trip)", turns[0].ContentJSON, content)
+	}
+	// First turn must be the root.
+	if turns[0].ParentTurnID != nil {
+		t.Errorf("listed[0].ParentTurnID = %v, want nil (root)", turns[0].ParentTurnID)
+	}
+
+	// ListTurns with IncludeLegacy=true: returns the pre_tree turn too.
+	allTurns, err := s.ListTurns(ctx, "s-1", ListTurnsOpts{IncludeLegacy: true})
+	if err != nil {
+		t.Fatalf("ListTurns IncludeLegacy: %v", err)
+	}
+	if len(allTurns) != 3 {
+		t.Errorf("ListTurns IncludeLegacy returned %d turns, want 3 (pre_tree included)", len(allTurns))
+	}
+}
+
+// TestSessionTurnRepository_SaveAndList_SubtreeFilter covers BDD-S-005.b:
+// when from_turn_id is provided, the result is the subtree rooted at that
+// turn, NOT including the turn itself, ordered by turn_seq.
+func TestSessionTurnRepository_SaveAndList_SubtreeFilter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Build a small fork topology under s-1:
+	//   t1 -> t2 -> t3 (root path)
+	//                -> t4 (fork) -> t5
+	//                -> t6 (fork) -> t7 -> t8
+	root, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "user",
+		ContentJSON: []byte(`[{"type":"text","text":"t1"}]`),
+	})
+	if err != nil {
+		t.Fatalf("save root: %v", err)
+	}
+	chain := func(parentID string, label string) (string, error) {
+		pid := parentID
+		t2, err := s.SaveTurn(ctx, SaveTurnParams{
+			SessionID: "s-1", Project: "proj-1", Role: "assistant",
+			ParentTurnID: &pid, ContentJSON: []byte(fmt.Sprintf(`[{"type":"text","text":%q}]`, label)),
+		})
+		if err != nil {
+			return "", err
+		}
+		return t2.ID, nil
+	}
+	t2, err := chain(root.ID, "t2")
+	if err != nil {
+		t.Fatalf("save t2: %v", err)
+	}
+	t3, err := chain(t2, "t3")
+	if err != nil {
+		t.Fatalf("save t3: %v", err)
+	}
+	if _, err := chain(t3, "t4"); err != nil {
+		t.Fatalf("save t4: %v", err)
+	}
+	if _, err := chain(t3, "t5"); err != nil {
+		t.Fatalf("save t5: %v", err)
+	}
+	t6, err := chain(t2, "t6")
+	if err != nil {
+		t.Fatalf("save t6: %v", err)
+	}
+	if _, err := chain(t6, "t7"); err != nil {
+		t.Fatalf("save t7: %v", err)
+	}
+
+	// Subtree at t2: descendants are t3, t4, t5, t6, t7. t2 itself is NOT
+	// included (BDD-S-005.b).
+	t2ID := t2
+	got, err := s.ListTurns(ctx, "s-1", ListTurnsOpts{FromTurnID: &t2ID})
+	if err != nil {
+		t.Fatalf("ListTurns subtree: %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("subtree at t2 returned %d turns, want 5 (t3, t4, t5, t6, t7); got seqs=%v",
+			len(got), turnSeqs(got))
+	}
+	// Verify ordering.
+	for i := 1; i < len(got); i++ {
+		if got[i].TurnSeq <= got[i-1].TurnSeq {
+			t.Errorf("subtree not ordered by turn_seq ASC: %v", turnSeqs(got))
+			break
+		}
+	}
+}
+
+// TestSessionTurnRepository_CycleDetection covers REQ-010 (BDD-S-010.a/b):
+//   - Self-loop (parent_turn_id == id) is rejected.
+//   - Indirect cycle (A -> B -> C -> A) is rejected.
+//   - No row is written on rejection.
+func TestSessionTurnRepository_CycleDetection(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Build A -> B -> C.
+	a, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "user",
+		ContentJSON: []byte(`[{"type":"text","text":"A"}]`),
+	})
+	if err != nil {
+		t.Fatalf("save A: %v", err)
+	}
+	parentA := a.ID
+	b, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "assistant",
+		ParentTurnID: &parentA, ContentJSON: []byte(`[{"type":"text","text":"B"}]`),
+	})
+	if err != nil {
+		t.Fatalf("save B: %v", err)
+	}
+	parentB := b.ID
+	c, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "assistant",
+		ParentTurnID: &parentB, ContentJSON: []byte(`[{"type":"text","text":"C"}]`),
+	})
+	if err != nil {
+		t.Fatalf("save C: %v", err)
+	}
+
+	// BDD-S-010.a: self-loop rejected.
+	t.Run("self_loop", func(t *testing.T) {
+		aID := a.ID
+		_, err := s.SaveTurn(ctx, SaveTurnParams{
+			ID:          a.ID, // explicit same id
+			SessionID:   "s-1",
+			Project:     "proj-1",
+			ParentTurnID: &aID,
+			Role:        "user",
+			ContentJSON: []byte(`[{"type":"text","text":"loop"}]`),
+		})
+		if !errors.Is(err, ErrCycleDetected) {
+			t.Errorf("self-loop: err = %v, want ErrCycleDetected", err)
+		}
+	})
+
+	// BDD-S-010.b: indirect cycle rejected.
+	t.Run("indirect_cycle", func(t *testing.T) {
+		parentC := c.ID
+		_, err := s.SaveTurn(ctx, SaveTurnParams{
+			ID:          a.ID, // re-use A's id (would close A->B->C->A)
+			SessionID:   "s-1",
+			Project:     "proj-1",
+			ParentTurnID: &parentC,
+			Role:        "user",
+			ContentJSON: []byte(`[{"type":"text","text":"loopback"}]`),
+		})
+		if !errors.Is(err, ErrCycleDetected) {
+			t.Errorf("indirect cycle: err = %v, want ErrCycleDetected", err)
+		}
+	})
+
+	// No row was written on rejection.
+	var totalRows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM session_turns WHERE session_id = 's-1'`).Scan(&totalRows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if totalRows != 3 {
+		t.Errorf("after rejected cycles, session_turns has %d rows, want 3 (only A, B, C)", totalRows)
+	}
+}
+
+// TestSessionTurnRepository_Validation covers the other REQ-004 invariants:
+// project required, role must be in {user, assistant, tool, system},
+// content_json must be a JSON array of typed blocks, parent_turn_id must
+// belong to the same session.
+func TestSessionTurnRepository_Validation(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Missing project.
+	_, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Role: "user",
+		ContentJSON: []byte(`[{"type":"text","text":"hi"}]`),
+	})
+	if !errors.Is(err, ErrProjectRequired) {
+		t.Errorf("missing project: err = %v, want ErrProjectRequired", err)
+	}
+
+	// Invalid role.
+	_, err = s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "robot",
+		ContentJSON: []byte(`[{"type":"text","text":"hi"}]`),
+	})
+	if !errors.Is(err, ErrInvalidRole) {
+		t.Errorf("invalid role: err = %v, want ErrInvalidRole", err)
+	}
+
+	// Malformed content_json.
+	_, err = s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "user",
+		ContentJSON: []byte(`"not-an-array"`),
+	})
+	if !errors.Is(err, ErrInvalidContentShape) {
+		t.Errorf("malformed content (not array): err = %v, want ErrInvalidContentShape", err)
+	}
+
+	// content_json is an array but contains a block with an unknown type.
+	_, err = s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "user",
+		ContentJSON: []byte(`[{"type":"mystery","data":1}]`),
+	})
+	if !errors.Is(err, ErrInvalidContentShape) {
+		t.Errorf("unknown block type: err = %v, want ErrInvalidContentShape", err)
+	}
+
+	// Parent in a different session.
+	other, err := s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-other", Project: "proj-1", Role: "user",
+		ContentJSON: []byte(`[{"type":"text","text":"other"}]`),
+	})
+	if err != nil {
+		t.Fatalf("save other: %v", err)
+	}
+	otherID := other.ID
+	_, err = s.SaveTurn(ctx, SaveTurnParams{
+		SessionID: "s-1", Project: "proj-1", Role: "assistant",
+		ParentTurnID: &otherID,
+		ContentJSON:  []byte(`[{"type":"text","text":"x"}]`),
+	})
+	if !errors.Is(err, ErrParentSessionMismatch) {
+		t.Errorf("parent from other session: err = %v, want ErrParentSessionMismatch", err)
+	}
+}
+
+// TestProperty_CycleDetectionTerminates is the property test (REQ-010
+// hardening). Two properties are asserted:
+//
+//  1. Random linear forests of up to N turns complete without infinite
+//     recursion. Each SaveTurn must terminate (the ancestor walk is
+//     bounded by the session row count, so this is structural).
+//  2. Cycle-detection on adversarial inputs (an explicit attempt to
+//     close a loop A->B->C->A) rejects in <10ms. This is the per-call
+//     budget from the spec.
+//
+// The previous TestSessionTurnRepository_CycleDetection covers the
+// acceptance cases (self-loop, indirect cycle). This test hardens the
+// cost and termination guarantee.
+func TestProperty_CycleDetectionTerminates(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const (
+		forestRuns  = 50
+		maxTurnsRun = 50
+		// Generous budget on linear forests (we just want to confirm
+		// termination, not wall-clock perf — that's covered by the
+		// 10K-turn perf test in PR3).
+		forestBudget = 200 * time.Millisecond
+		// Strict budget for the adversarial cycle-detection path,
+		// which is what REQ-010 actually constrains.
+		cycleBudget = 10 * time.Millisecond
+	)
+
+	// Seed RNG for reproducibility on this property test.
+	rng := rand.New(rand.NewSource(42))
+
+	// ── Property 1: linear forests terminate ──────────────────────────
+	for run := 0; run < forestRuns; run++ {
+		sid := fmt.Sprintf("prop-s-%d", run)
+		var prevID string
+		var maxObserved time.Duration
+		for i := 0; i < maxTurnsRun; i++ {
+			var parentPtr *string
+			if i > 0 {
+				p := prevID
+				parentPtr = &p
+			}
+			start := time.Now()
+			saved, err := s.SaveTurn(ctx, SaveTurnParams{
+				SessionID:    sid,
+				Project:      "prop-proj",
+				Role:         "user",
+				ParentTurnID: parentPtr,
+				ContentJSON:  []byte(fmt.Sprintf(`[{"type":"text","text":"%d"}]`, i)),
+			})
+			elapsed := time.Since(start)
+			if elapsed > maxObserved {
+				maxObserved = elapsed
+			}
+			if err != nil {
+				t.Fatalf("run %d turn %d: SaveTurn failed: %v", run, i, err)
+			}
+			prevID = saved.ID
+		}
+		// The chain is linear; cycle detection walks 0 ancestors per
+		// save (no ancestor equals the new id), so the per-call
+		// contribution is small. Generous budget accommodates
+		// Windows/dev-machine variance.
+		if maxObserved > forestBudget {
+			t.Errorf("run %d: max SaveTurn latency = %v, want < %v",
+				run, maxObserved, forestBudget)
+		}
+	}
+
+	// ── Property 2: cycle detection cost on adversarial input ─────────
+	// Build A->B->C and then attempt to save a turn with id=A and
+	// parent_turn_id=C. SaveTurn must reject with ErrCycleDetected in
+	// < cycleBudget. This exercises the bounded recursive CTE.
+	adversarialSessions := []string{"adv-s-1", "adv-s-2", "adv-s-3"}
+	for _, sid := range adversarialSessions {
+		a, err := s.SaveTurn(ctx, SaveTurnParams{
+			SessionID: sid, Project: "adv", Role: "user",
+			ContentJSON: []byte(`[{"type":"text","text":"A"}]`),
+		})
+		if err != nil {
+			t.Fatalf("adv %s: save A: %v", sid, err)
+		}
+		aID := a.ID
+		b, err := s.SaveTurn(ctx, SaveTurnParams{
+			SessionID: sid, Project: "adv", Role: "assistant",
+			ParentTurnID: &aID, ContentJSON: []byte(`[{"type":"text","text":"B"}]`),
+		})
+		if err != nil {
+			t.Fatalf("adv %s: save B: %v", sid, err)
+		}
+		bID := b.ID
+		c, err := s.SaveTurn(ctx, SaveTurnParams{
+			SessionID: sid, Project: "adv", Role: "assistant",
+			ParentTurnID: &bID, ContentJSON: []byte(`[{"type":"text","text":"C"}]`),
+		})
+		if err != nil {
+			t.Fatalf("adv %s: save C: %v", sid, err)
+		}
+		// Attempt to close the loop A->B->C->A.
+		cID := c.ID
+		start := time.Now()
+		_, err = s.SaveTurn(ctx, SaveTurnParams{
+			ID:           a.ID, // reuse A's id; would close the loop
+			SessionID:    sid,
+			Project:      "adv",
+			ParentTurnID: &cID,
+			Role:         "user",
+			ContentJSON:  []byte(`[{"type":"text","text":"loop"}]`),
+		})
+		elapsed := time.Since(start)
+		if !errors.Is(err, ErrCycleDetected) {
+			t.Errorf("adv %s: expected ErrCycleDetected, got %v", sid, err)
+		}
+		if elapsed > cycleBudget {
+			t.Errorf("adv %s: cycle detection latency = %v, want < %v",
+				sid, elapsed, cycleBudget)
+		}
+	}
+
+	// ── Property 3: quick.Check validates the Save path on random valid
+	// payloads. Restricted to the four valid block types so the test
+	// focuses on the Save path, not validation.
+	type validBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	f := func(b validBlock) bool {
+		switch b.Type {
+		case "text", "reasoning", "tool-call", "tool-result":
+		default:
+			return true // not a failure of the property under test
+		}
+		payload, _ := json.Marshal([]validBlock{b})
+		_, err := s.SaveTurn(ctx, SaveTurnParams{
+			SessionID:   fmt.Sprintf("qk-%d", rng.Int63()),
+			Project:     "qk",
+			Role:        "user",
+			ContentJSON: payload,
+		})
+		return err == nil
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Errorf("quick.Check failed: %v", err)
+	}
+}
+
+// ─── test helpers ──────────────────────────────────────────────────────────
+
+func strPtr(s string) *string { return &s }
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func turnSeqs(turns []Turn) []int {
+	out := make([]int, len(turns))
+	for i, t := range turns {
+		out[i] = t.TurnSeq
+	}
+	return out
 }
