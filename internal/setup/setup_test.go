@@ -2363,13 +2363,16 @@ func TestClaudeCodeUserPromptHookDefersProjectDetectionUntilNeeded(t *testing.T)
 	if err != nil {
 		t.Fatalf("read user prompt hook: %v", err)
 	}
-	text := string(data)
+	// The hook script is the source of truth and MUST NOT be edited. On Windows,
+	// .gitattributes checks the script out with CRLF, so normalize line endings
+	// to LF before asserting against literal \n substrings.
+	textLF := strings.ReplaceAll(string(data), "\r\n", "\n")
 
-	sessionParse := strings.Index(text, "SESSION_ID=$(echo \"$INPUT\" | jq -r '.session_id // empty')")
+	sessionParse := strings.Index(textLF, "SESSION_ID=$(echo \"$INPUT\" | jq -r '.session_id // empty')")
 	if sessionParse < 0 {
 		t.Fatalf("user prompt hook missing expected session parsing structure")
 	}
-	sessionKeyBranchRel := strings.Index(text[sessionParse:], "if [ -n \"$SESSION_ID\" ]; then")
+	sessionKeyBranchRel := strings.Index(textLF[sessionParse:], "if [ -n \"$SESSION_ID\" ]; then")
 	sessionKeyBranch := -1
 	if sessionKeyBranchRel >= 0 {
 		sessionKeyBranch = sessionParse + sessionKeyBranchRel
@@ -2377,20 +2380,20 @@ func TestClaudeCodeUserPromptHookDefersProjectDetectionUntilNeeded(t *testing.T)
 	if sessionParse < 0 || sessionKeyBranch < 0 {
 		t.Fatalf("user prompt hook missing expected session parsing/keying structure")
 	}
-	if preKey := text[sessionParse:sessionKeyBranch]; strings.Contains(preKey, "detect_project") {
+	if preKey := textLF[sessionParse:sessionKeyBranch]; strings.Contains(preKey, "detect_project") {
 		t.Fatalf("user prompt hook must not detect project before session_id-first keying")
 	}
 
 	fallbackDetect := "PROJECT=$(detect_project \"$CWD\")\n  SAFE_PROJECT="
-	if !strings.Contains(text, fallbackDetect) {
+	if !strings.Contains(textLF, fallbackDetect) {
 		t.Fatalf("user prompt hook should detect project only for the no-session_id fallback key")
 	}
 
-	subsequentMarker := strings.Index(text, "# SUBSEQUENT MESSAGES")
+	subsequentMarker := strings.Index(textLF, "# SUBSEQUENT MESSAGES")
 	if subsequentMarker < 0 {
 		t.Fatalf("user prompt hook missing subsequent-message section")
 	}
-	if !strings.Contains(text[subsequentMarker:], "PROJECT=$(detect_project \"$CWD\")") {
+	if !strings.Contains(textLF[subsequentMarker:], "PROJECT=$(detect_project \"$CWD\")") {
 		t.Fatalf("user prompt hook should detect project for subsequent nudge logic after first-message handling")
 	}
 }
