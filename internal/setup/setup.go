@@ -163,7 +163,7 @@ const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"
 // using the resolved absolute binary path from os.Executable().
 func codexEngramBlockStr() string {
 	cmd := resolveEngramCommand()
-	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", cmd) + "\nargs = [\"mcp\", \"--tools=agent\"]"
+	return "[mcp_servers.engram]\ncommand = " + tomlStringEscape(cmd) + "\nargs = [\"mcp\", \"--tools=agent\"]"
 }
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
@@ -1339,7 +1339,7 @@ func upsertCodexEngramBlock(content string) string {
 func upsertTopLevelTOMLString(content, key, value string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
-	lineValue := fmt.Sprintf("%s = %q", key, value)
+	lineValue := key + " = " + tomlStringEscape(value)
 
 	var cleaned []string
 	for _, line := range lines {
@@ -1365,6 +1365,51 @@ func upsertTopLevelTOMLString(content, key, value string) string {
 	out = append(out, cleaned[insertAt:]...)
 
 	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
+}
+
+// tomlStringEscape escapes v as a TOML v1.0 single-line basic string,
+// including the wrapping double quotes. The set of escapes is intentionally
+// narrow: \\, \", \n, \r, \t, \b, \f, plus \uXXXX for control bytes 0x00..0x1F
+// not covered by the named escapes. Raw UTF-8 runes are passed through
+// unchanged (TOML accepts non-ASCII literal bytes in basic strings as long as
+// the byte sequence is valid UTF-8).
+//
+// We can't use Go's percent-q format verb here: it emits \xHH for non-printable
+// bytes, which is NOT a valid TOML basic-string escape (TOML rejects \x in basic
+// strings; the only legal non-named escapes are \uXXXX and \UXXXXXXXX).
+func tomlStringEscape(v string) string {
+	var b strings.Builder
+	b.Grow(len(v) + 8)
+	b.WriteByte('"')
+	for _, r := range v {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		default:
+			if r < 0x20 {
+				// 0x00..0x1F control byte not covered by the named escapes.
+				// Emit as \uXXXX (4-hex). TOML v1.0 also allows \UXXXXXXXX;
+				// 4-hex is sufficient for the BMP control plane.
+				fmt.Fprintf(&b, `\u%04X`, r)
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // ─── Platform paths ──────────────────────────────────────────────────────────
