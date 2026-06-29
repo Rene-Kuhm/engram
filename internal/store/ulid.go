@@ -190,4 +190,13 @@ var (
 	// when Mode is "truncate" in PR2 (truncate is reserved for PR4 per
 	// locked-in decision Q6).
 	ErrInvalidRewindMode = errors.New("session_turns: rewind mode must be 'branch' or 'truncate'")
+
+	// ErrTruncateRequiresConfirmation is returned by RewindSession when
+	// Mode is "truncate" but ConfirmTruncate=false. PR4 / REQ-011 / Risk
+	// #2: truncate is a HIGH-SEVERITY operation and MUST be opt-in. The
+	// dedicated sentinel lets callers (CLI, MCP, future audit pipeline)
+	// distinguish the opt-in rejection from generic rewind errors via
+	// errors.Is — which is the only durable signal a hard-coded string
+	// match cannot give across renames / l10n.
+	ErrTruncateRequiresConfirmation = errors.New("session_turns: rewind truncate mode requires explicit ConfirmTruncate=true")
 )

@@ -49,15 +49,22 @@ type SaveTurnParams struct {
 //
 //   - IncludeLegacy: include pre_tree=true synthetic turns (default false;
 //     Q1 / REQ-005 BDD-S-005.a — pre_tree rows are hidden by default).
+//   - IncludeTruncated: include rows marked with the
+//     metadata.truncated_at_turn_id marker (default false; PR4 / REQ-007).
+//     By default, truncate-mode soft-deleted descendants are hidden from
+//     the user-facing turn list — recovery is explicit via
+//     RecoverTruncated + ForkSession, matching the pre_tree /
+//     include_legacy contract.
 //   - FromTurnID: subtree filter (REQ-005 BDD-S-005.b). When set, the
 //     result is the descendants of the given turn (excluding the turn
 //     itself), still ordered by turn_seq ASC.
 //   - Limit / Offset: pagination. Limit <= 0 means unbounded.
 type ListTurnsOpts struct {
-	IncludeLegacy bool
-	FromTurnID    *string
-	Limit         int
-	Offset        int
+	IncludeLegacy    bool
+	IncludeTruncated bool
+	FromTurnID       *string
+	Limit            int
+	Offset           int
 }
 
 // ─── SaveTurn ───────────────────────────────────────────────────────────────
@@ -297,6 +304,10 @@ func validateContentShape(content []byte) error {
 //
 //   - Default excludes pre_tree=true rows (Q1 / BDD-S-005.a).
 //   - With IncludeLegacy=true, those rows are included.
+//   - Default excludes rows marked with metadata.truncated_at_turn_id
+//     (PR4 / REQ-007 truncate-mode descendants). With IncludeTruncated=true,
+//     those rows are included — the explicit opt-in model mirrors
+//     include_legacy and lets recovery be explicit.
 //   - With FromTurnID, only descendants of that turn are returned
 //     (the turn itself is NOT included — BDD-S-005.b).
 //   - Limit/Offset paginate; Limit <= 0 means unbounded.
@@ -309,6 +320,13 @@ func (s *Store) ListTurns(ctx context.Context, sessionID string, opts ListTurnsO
 	)
 
 	filterPreTree := "AND (metadata_json IS NULL OR json_extract(metadata_json, '$.pre_tree') IS NULL OR json_extract(metadata_json, '$.pre_tree') != 1)"
+	// Truncation is session-scoped: only rows whose truncated marker
+	// points at THIS session are hidden. After a fork into a fresh
+	// session_id, cloned rows carry the source's marker baggage, but
+	// they ARE the visible content of the forked session — not a
+	// truncated row in the new session's view. This keeps the contract
+	// consistent with re-fork (REQ-007 truncate is recoverable).
+	filterNotTruncated := fmt.Sprintf("AND (metadata_json IS NULL OR json_extract(metadata_json, '$.truncated_from_session_id') IS NULL OR json_extract(metadata_json, '$.truncated_from_session_id') != '%s')", strings.ReplaceAll(sessionID, "'", "''"))
 
 	if opts.FromTurnID != nil {
 		// Subtree: descendants of opts.FromTurnID, excluding the turn itself.
@@ -338,6 +356,9 @@ func (s *Store) ListTurns(ctx context.Context, sessionID string, opts ListTurnsO
 		if !opts.IncludeLegacy {
 			cte += " " + filterPreTree
 		}
+		if !opts.IncludeTruncated {
+			cte += " " + filterNotTruncated
+		}
 		cte += " ORDER BY t.turn_seq ASC"
 		if opts.Limit > 0 {
 			cte += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -357,6 +378,9 @@ func (s *Store) ListTurns(ctx context.Context, sessionID string, opts ListTurnsO
 		args := []any{sessionID}
 		if !opts.IncludeLegacy {
 			query += " " + filterPreTree
+		}
+		if !opts.IncludeTruncated {
+			query += " " + filterNotTruncated
 		}
 		query += " ORDER BY turn_seq ASC"
 		if opts.Limit > 0 {
