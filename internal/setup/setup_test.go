@@ -376,6 +376,13 @@ func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
+	// Pin install paths to test tempdir via seam override (REQ-A-0: HOME env is
+	// silently ignored on Windows by codexConfigPath → %APPDATA%). The seam
+	// default-delegates to the original function so production behavior is
+	// unchanged on real user machines; resetSetupSeams restores it via
+	// t.Cleanup after this test.
+	codexConfigPathFn = func() string { return filepath.Join(home, ".codex", "config.toml") }
+
 	lookPathFn = func(file string) (string, error) {
 		return "", errors.New("not found")
 	}
