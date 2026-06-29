@@ -1121,6 +1121,15 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Backfill (REQ-003, BDD-S-003.a/b): for every pre-tree sessions row,
+	// insert exactly one synthetic turn carrying the prior summary text as
+	// a typed text block. Idempotent — re-runs insert nothing because the
+	// per-row guard (session_id, turn_seq=1, role='system',
+	// metadata.pre_tree=true) finds an existing row.
+	if err := s.backfillSessionTurns(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
