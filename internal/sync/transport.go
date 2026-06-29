@@ -64,6 +64,9 @@ func validateSyncDir(syncDir string) error {
 // Returns an empty manifest (Version=1) if the file does not exist.
 func (ft *FileTransport) ReadManifest() (*Manifest, error) {
 	if err := validateSyncDir(ft.syncDir); err != nil {
+		if os.IsNotExist(err) {
+			return &Manifest{Version: 1}, nil
+		}
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
 	path := filepath.Join(ft.syncDir, "manifest.json")
