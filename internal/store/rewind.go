@@ -1,3 +1,58 @@
+// Package store: rewind.go.
+//
+// RewindSession and the truncate contract — read this before touching.
+//
+// The rewind sub-system implements two modes for stripping unwanted
+// descendants off an LLM agent's session tree. The branch mode is the
+// ALWAYS-SAFE default (locked-in decision Q6 / REQ-007). The truncate
+// mode is the destructive-but-recoverable path that lands in PR4.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// SAFETY CONTRACT — TRUNCATE MODE (REQ-011 / Risk #2 / Q6)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// truncate is opt-in. It MUST NOT fire without an explicit
+// ConfirmTruncate=true on the RewindSessionParams. The enforcement is
+// at three layers (defense-in-depth):
+//
+//  1. CLI parser layer (`cmd/engram/session.go`): refuses to call the
+//     backend if `--mode=truncate` is supplied without `--confirm`.
+//  2. Service layer (`(*Store).RewindSession` / `rewindTruncate`):
+//     returns ErrTruncateRequiresConfirmation when ConfirmTruncate=false.
+//  3. Repository layer: the soft-delete transaction begins ONLY AFTER
+//     the opt-in check has passed, so a missing flag can never mutate a
+//     row.
+//
+// Recoverability contract:
+//   - Truncate is SOFT DELETE: descendants are stamped with
+//     metadata.truncated_at_turn_id, metadata.truncated_from_session_id
+//     and metadata.truncated_at, but rows remain in session_turns.
+//   - Recovery is EXPLICIT: callers enumerate truncated descendants via
+//     RecoverTruncated, then re-fork them via the existing ForkSession.
+//   - The kept prefix (root → AtTurnID inclusive) is untouched; the
+//     target turn itself carries no truncation marker (the user can
+//     still see and reference it).
+//   - ListTurns hides descendants whose
+//     metadata.truncated_from_session_id matches the queried session,
+//     mirroring the pre_tree / include_legacy opt-in model.
+//
+// Auditability contract (Risk #2):
+//   - Every successful truncate emits a single logfmt-style audit line
+//     at INFO under [store] audit: that includes session_id,
+//     at_turn_id, agent_name (when set), soft_deleted_count, and
+//     unix_ms. This is the durable signal that lets ops answer "who
+//     truncated what, when?".
+//
+// ─────────────────────────────────────────────────────────────────────────
+// BRANCH MODE — always safe (Q6)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// branch delegates to ForkSession. The original session is never
+// mutated. The new session's root turn carries metadata
+// rewound_from_session_id and rewound_from_turn_id. ForkSession
+// itself enforces REQ-012 (cross-project fork forbidden), REQ-006
+// (byte-identical content_json / metadata clone), and atomicity (a
+// single transaction; partial forks are impossible).
 package store
 
 import (
@@ -57,26 +112,27 @@ type RewindResult struct {
 	SoftDeletedCount int
 }
 
-// RewindSession applies branch (default) or truncate (opt-in, PR4-only)
-// rewind semantics to a session.
+// RewindSession applies branch (default) or truncate (opt-in) rewind
+// semantics to a session.
 //
-// In branch mode (the only mode implemented in PR2):
-//   - Clones the kept prefix root..AtTurnID into a new session via
-//     ForkSession. The new session's root carries metadata
-//     rewound_from_session_id and rewound_from_turn_id (REQ-007).
-//   - The original session is UNTOUCHED. This is the safe default that
-//     makes rewind non-destructive on side-effecting turns (Risk #2).
+// The full safety contract is documented at the top of this file —
+// read it before changing anything here. In particular:
 //
-// In truncate mode (reserved for PR4):
-//   - MUST return ErrInvalidRewindMode without touching any rows.
-//     The actual soft-delete implementation lands in PR4 along with
-//     the ConfirmTruncate guard.
+//   - Branch mode (Q6 default): clones the kept prefix into a new
+//     session via ForkSession. Original session is UNTOUCHED.
+//   - Truncate mode (REQ-011 / Risk #2): requires explicit
+//     ConfirmTruncate=true. Otherwise returns
+//     ErrTruncateRequiresConfirmation. On success, descendants of
+//     AtTurnID are soft-deleted via metadata flags (rows remain on
+//     disk; recoverable via RecoverTruncated + ForkSession), and an
+//     audit log line is emitted.
 //
 // Failure modes:
 //   - Unknown Mode → ErrInvalidRewindMode
-//   - Mode=truncate (PR2 stub) → ErrInvalidRewindMode
-//   - Cross-project rejection comes from ForkSession → ErrCrossProjectFork
-//   - AtTurnID missing → ErrTargetTurnNotFound (from ForkSession)
+//   - Mode=truncate AND ConfirmTruncate=false → ErrTruncateRequiresConfirmation
+//   - Cross-project target mismatch → ErrCrossProjectFork (mirrors fork guard)
+//   - AtTurnID missing → ErrTargetTurnNotFound
+//   - REQ-006 prefix-walk errors from ForkSession (branch mode only)
 func (s *Store) RewindSession(ctx context.Context, params RewindSessionParams) (RewindResult, error) {
 	mode := params.Mode
 	if mode == "" {
