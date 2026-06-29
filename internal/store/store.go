@@ -1092,12 +1092,15 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// ── Phase: jsonl-session-tree (PR1a) — session_turns table + indexes ──
+	// ── Phase: jsonl-session-tree (PR1a/PR3) — session_turns table + indexes ──
 	// One row per turn. parent_turn_id links turns into a tree (NULL for root).
-	// No UNIQUE(session_id, turn_seq) here — that lands in PR3 along with
-	// the concurrent-save retry policy (locked-in decision C).
 	// Locked-in decision A: explicit project column (denormalized, NOT NULL).
 	// UNIQUE on id is implicit (TEXT PRIMARY KEY).
+	// Locked-in decision C (PR3): UNIQUE(session_id, turn_seq) is the durable
+	// guarantee against concurrent-save turn_seq collisions. The
+	// SessionTurnRepository.Save retry policy (max 3 attempts with jittered
+	// backoff) lands on top of this index. Idempotent via IF NOT EXISTS so
+	// re-running migrate() on a v7 DB is a no-op.
 	if _, err := s.execHook(s.db, `
 		CREATE TABLE IF NOT EXISTS session_turns (
 			id             TEXT    PRIMARY KEY,
@@ -1117,6 +1120,8 @@ func (s *Store) migrate() error {
 			ON session_turns(session_id, turn_seq);
 		CREATE INDEX IF NOT EXISTS idx_session_turns_parent
 			ON session_turns(parent_turn_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_turns_session_seq
+			ON session_turns(session_id, turn_seq);
 	`); err != nil {
 		return err
 	}
