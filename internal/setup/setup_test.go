@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func resetSetupSeams(t *testing.T) {
@@ -202,6 +204,13 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
+	// Pin install paths to test tempdir via seam override (REQ-A-0: HOME env is
+	// silently ignored on Windows by codexConfigPath → %APPDATA%). The seam
+	// default-delegates to the original function so production behavior is
+	// unchanged on real user machines; resetSetupSeams restores it via
+	// t.Cleanup after this test.
+	codexConfigPathFn = func() string { return filepath.Join(home, ".codex", "config.toml") }
+
 	configPath := filepath.Join(home, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
@@ -262,11 +271,11 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 			t.Fatalf("expected engram args in config, got:\n%s", text)
 		}
 		instructionsPath := filepath.Join(home, ".codex", "engram-instructions.md")
-		if !strings.Contains(text, "model_instructions_file = \""+instructionsPath+"\"") {
+		if !strings.Contains(text, "model_instructions_file = "+tomlStringEscape(instructionsPath)) {
 			t.Fatalf("expected model_instructions_file in config, got:\n%s", text)
 		}
 		compactPromptPath := filepath.Join(home, ".codex", "engram-compact-prompt.md")
-		if !strings.Contains(text, "experimental_compact_prompt_file = \""+compactPromptPath+"\"") {
+		if !strings.Contains(text, "experimental_compact_prompt_file = "+tomlStringEscape(compactPromptPath)) {
 			t.Fatalf("expected compact prompt file key in config, got:\n%s", text)
 		}
 		firstSection := strings.Index(text, "[profile]")
@@ -3480,5 +3489,214 @@ func TestPluginSubAgentFiltering(t *testing.T) {
 	// session.deleted must clean up subAgentSessions too
 	if !strings.Contains(content, `subAgentSessions.delete(sessionId)`) {
 		t.Fatalf("session.deleted handler must clean up subAgentSessions set")
+	}
+}
+
+// ─── TOML basic-string roundtrip (REQ-TOML-ENC-1..4) ───────────────────────
+//
+// tomlStringEscape is the production helper that emits TOML v1.0 basic-string
+// escapes. These tests pin its behaviour with a hand-rolled decoder so we can
+// catch regressions without pulling in a TOML parser. Production code at
+// codexEngramBlockStr (setup.go:166) and upsertTopLevelTOMLString
+// (setup.go:1342) calls tomlStringEscape; the decoder inverts that encoding.
+
+// tomlDecodeString inverts tomlStringEscape: it strips the wrapping double
+// quotes and resolves the escape sequences that tomlStringEscape is allowed to
+// emit: \\, \", \n, \r, \t, \b, \f, \uXXXX, plus raw UTF-8 runes. Any other
+// escape fails the test — that means the production helper produced invalid
+// TOML.
+func tomlDecodeString(t *testing.T, s string) string {
+	t.Helper()
+
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		t.Fatalf("tomlDecodeString: not a TOML basic string %q", s)
+	}
+	s = s[1 : len(s)-1]
+
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c != '\\' {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && size <= 1 {
+				t.Fatalf("tomlDecodeString: invalid UTF-8 byte 0x%02x in %q", c, s)
+			}
+			b.WriteRune(r)
+			i += size
+			continue
+		}
+		// Escape sequence.
+		i++
+		if i >= len(s) {
+			t.Fatalf("tomlDecodeString: trailing backslash in %q", s)
+		}
+		switch s[i] {
+		case '\\':
+			b.WriteByte('\\')
+			i++
+		case '"':
+			b.WriteByte('"')
+			i++
+		case 'n':
+			b.WriteByte('\n')
+			i++
+		case 'r':
+			b.WriteByte('\r')
+			i++
+		case 't':
+			b.WriteByte('\t')
+			i++
+		case 'b':
+			b.WriteByte('\b')
+			i++
+		case 'f':
+			b.WriteByte('\f')
+			i++
+		case 'u':
+			i++
+			if i+4 > len(s) {
+				t.Fatalf("tomlDecodeString: truncated \\uXXXX escape in %q", s)
+			}
+			code, err := strconv.ParseUint(s[i:i+4], 16, 32)
+			if err != nil {
+				t.Fatalf("tomlDecodeString: invalid \\uXXXX %q in %q: %v", s[i:i+4], s, err)
+			}
+			b.WriteRune(rune(code))
+			i += 4
+		default:
+			t.Fatalf("tomlDecodeString: unsupported escape \\%c in %q", s[i], s)
+		}
+	}
+	return b.String()
+}
+
+func TestTomlStringEscape(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"empty", ""},
+		{"plain_ascii", "engram"},
+		{"windows_path", `C:\Users\insyd\.codex\engram.exe`},
+		{"backslash", `a\b`},
+		{"double_quote", `he said "hi"`},
+		{"newline", "line1\nline2"},
+		{"carriage_return", "x\ry"},
+		{"tab", "a\tb"},
+		{"backspace", "a\bb"},
+		{"form_feed", "a\fb"},
+		{"mixed_combo", "C:\\Users\\\"x\"\nY"},
+		{"raw_utf8", "café"},
+		{"control_byte_0x01", "a\x01b"},
+		{"control_byte_0x1f", "a\x1fb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tomlStringEscape(tc.in)
+			// Roundtrip: decoding the escape must yield the original input.
+			if decoded := tomlDecodeString(t, got); decoded != tc.in {
+				t.Fatalf("tomlStringEscape roundtrip mismatch:\n  input    = %q\n  escaped  = %q\n  decoded  = %q", tc.in, got, decoded)
+			}
+			// Output must be a single-line basic string (no raw newlines).
+			if strings.ContainsAny(got, "\n\r") {
+				t.Fatalf("tomlStringEscape produced raw newline in %q", got)
+			}
+		})
+	}
+}
+
+func TestCodexEngramBlockStr_Roundtrip(t *testing.T) {
+	// codexEngramBlockStr resolves the engram command via os.Executable();
+	// under `go test` on Windows that's the test binary's absolute path.
+	// Whatever the resolved value is, decoding the emitted TOML command
+	// value must reproduce it byte-for-byte.
+	wantCmd, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable(): %v", err)
+	}
+
+	block := codexEngramBlockStr()
+
+	const cmdPrefix = "[mcp_servers.engram]\ncommand = "
+	if !strings.HasPrefix(block, cmdPrefix) {
+		t.Fatalf("block missing command prefix %q, got:\n%s", cmdPrefix, block)
+	}
+	const cmdSuffix = "\nargs = [\"mcp\", \"--tools=agent\"]"
+	if !strings.HasSuffix(block, cmdSuffix) {
+		t.Fatalf("block missing args suffix %q, got:\n%s", cmdSuffix, block)
+	}
+
+	inner := strings.TrimPrefix(block, cmdPrefix)
+	inner = strings.TrimSuffix(inner, cmdSuffix)
+
+	decoded := tomlDecodeString(t, inner)
+	if decoded != wantCmd {
+		t.Fatalf("decoded command mismatch:\n  want    = %q\n  escaped = %q\n  decoded = %q", wantCmd, inner, decoded)
+	}
+}
+
+func TestUpsertTopLevelTOMLString_Roundtrip(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		key     string
+		value   string
+	}{
+		{
+			"plain_ascii",
+			"",
+			"name",
+			"engram",
+		},
+		{
+			"empty_value",
+			"",
+			"name",
+			"",
+		},
+		{
+			"windows_path",
+			"",
+			"model_instructions_file",
+			`C:\Users\insyd\.codex\engram-instructions.md`,
+		},
+		{
+			"existing_section_preserved",
+			"[profile]\nname = \"dev\"\n",
+			"model_instructions_file",
+			`C:\Users\insyd\.codex\engram-instructions.md`,
+		},
+		{
+			"replaces_existing_key",
+			"model_instructions_file = \"/old/path\"\n[profile]\nname = \"dev\"\n",
+			"model_instructions_file",
+			`C:\Users\insyd\.new\engram-instructions.md`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := upsertTopLevelTOMLString(tc.content, tc.key, tc.value)
+
+			// Locate the line beginning with key + " =" (the upserted value).
+			// Note: trailing space after "=" is trimmed when value is empty.
+			const keyPrefix = " = "
+			var foundLine string
+			for _, line := range strings.Split(out, "\n") {
+				trimmed := strings.TrimRight(line, " ")
+				if trimmed == tc.key+" =" || strings.HasPrefix(trimmed, tc.key+keyPrefix) {
+					foundLine = strings.TrimPrefix(trimmed, tc.key+keyPrefix)
+					break
+				}
+			}
+			if foundLine == "" {
+				t.Fatalf("expected line %q = ... in output:\n%s", tc.key, out)
+			}
+
+			decoded := tomlDecodeString(t, foundLine)
+			if decoded != tc.value {
+				t.Fatalf("decoded value mismatch:\n  want   = %q\n  line   = %q\n  decoded= %q\n  full   =\n%s", tc.value, foundLine, decoded, out)
+			}
+		})
 	}
 }
