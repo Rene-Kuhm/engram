@@ -330,6 +330,87 @@ func TestSessionRewind_TruncateWithoutConfirm_Rejected(t *testing.T) {
 	}
 }
 
+// TestSessionRecover_AfterTruncate covers the PR4 recovery flow:
+// after a truncate call, `engram session recover <sid>` MUST print the
+// recoverable descendant turns with their ids and turn_seq values, so
+// the human can decide which to re-fork.
+func TestSessionRecover_AfterTruncate(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-recover.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, string(out))
+	}
+	t.Chdir(dir)
+
+	cfg := testConfig(t)
+	const sessionID = "sess-recover-001"
+	const project = "session-recover"
+
+	s := openSeedStore(t, cfg)
+	rootID := mustSeedTurn(t, s, sessionID, project, "user", "rec-root", nil)
+	midID := mustSeedTurn(t, s, sessionID, project, "assistant", "rec-mid", &rootID)
+	leafID := mustSeedTurn(t, s, sessionID, project, "user", "rec-leaf", &midID)
+
+	// Truncate at turn 2: leaf (turn 3) becomes soft-deleted.
+	withArgs(t, "engram", "session", "rewind", sessionID,
+		"--at", midID, "--mode", "truncate", "--confirm")
+	stubExitWithPanic(t)
+	if stdout, stderr, _ := captureOutputAndRecover(t, func() { cmdSession(cfg) }); stderr != "" {
+		t.Fatalf("truncate stderr: %q", stderr)
+	} else if !strings.Contains(stdout, "soft_deleted: 1") {
+		t.Fatalf("truncate did not report soft_deleted=1; got: %q", stdout)
+	}
+
+	// Now recover: must print the soft-deleted leaf turn id.
+	withArgs(t, "engram", "session", "recover", sessionID)
+	stubExitWithPanic(t)
+	stdout, stderr, _ := captureOutputAndRecover(t, func() { cmdSession(cfg) })
+	if stderr != "" {
+		t.Fatalf("recover stderr: %q", stderr)
+	}
+	if !strings.Contains(stdout, "Recoverable turns:") {
+		t.Errorf("expected 'Recoverable turns:' header; got: %q", stdout)
+	}
+	if !strings.Contains(stdout, leafID) {
+		t.Errorf("expected recovered leaf id %q in stdout; got: %q", leafID, stdout)
+	}
+}
+
+// TestSessionRecover_NoTruncatedTurns covers the no-op path: when the
+// session has no soft-deleted descendants, `recover` MUST print a
+// clear "no truncated turns" line and exit 0 — no panic, no error.
+func TestSessionRecover_NoTruncatedTurns(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-recover-empty.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, string(out))
+	}
+	t.Chdir(dir)
+
+	cfg := testConfig(t)
+	const sessionID = "sess-recover-empty"
+	const project = "session-recover-empty"
+
+	s := openSeedStore(t, cfg)
+	_ = mustSeedTurn(t, s, sessionID, project, "user", "alive-1", nil)
+	_ = mustSeedTurn(t, s, sessionID, project, "assistant", "alive-2", nil)
+
+	withArgs(t, "engram", "session", "recover", sessionID)
+	stubExitWithPanic(t)
+	stdout, _, recovered := captureOutputAndRecover(t, func() { cmdSession(cfg) })
+	if recovered != nil {
+		t.Fatalf("recover with no truncated turns must exit 0 (got panic): %v", recovered)
+	}
+	if !strings.Contains(strings.ToLower(stdout), "no truncated") &&
+		!strings.Contains(strings.ToLower(stdout), "0 recoverable") {
+		t.Errorf("expected empty-state signal in stdout; got: %q", stdout)
+	}
+}
+
 // TestSessionExport_ImportRoundtrip seeds a session, exports it via
 // `engram session export <sid>` to a temp file, then imports that file via
 // `engram session import <path>` into a fresh session. The import must

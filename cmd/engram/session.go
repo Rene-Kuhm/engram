@@ -33,6 +33,8 @@ func cmdSession(cfg store.Config) {
 		cmdSessionFork(cfg)
 	case "rewind":
 		cmdSessionRewind(cfg)
+	case "recover":
+		cmdSessionRecover(cfg)
 	case "export":
 		cmdSessionExport(cfg)
 	case "import":
@@ -444,6 +446,97 @@ func parseSessionRewindArgs(args []string) (sid, atTurnID, mode, project string,
 	}
 	return sid, atTurnID, mode, project, confirmTruncate, nil
 }
+
+// ─── recover ─────────────────────────────────────────────────────────────────
+//
+// cmdSessionRecover prints the soft-deleted (truncated) descendant
+// turns for a session. PR4 / REQ-007 truncate contract:
+// "destructive but recoverable". Without this command, users would have
+// to query the SQLite table directly to find truncated descendants —
+// an unreasonable burden for the safety-critical recover path.
+//
+// Implementation maps directly to store.RecoverTruncated: read-only,
+// returns an empty slice with no error when there is nothing to
+// recover. The CLI keeps the empty-state UX friendly (no error, clear
+// "(0 recoverable)" line) instead of failing.
+
+func cmdSessionRecover(cfg store.Config) {
+	args := os.Args[3:]
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: engram session recover <sid> [--project P]")
+		exitFunc(1)
+		return
+	}
+	var sessionID, projectFlag string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch a {
+		case "--project":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--project requires a value")
+				exitFunc(1)
+				return
+			}
+			projectFlag = args[i+1]
+			i++
+		default:
+			if sessionID == "" && !strings.HasPrefix(a, "--") {
+				sessionID = a
+			}
+		}
+	}
+	if sessionID == "" {
+		fmt.Fprintln(os.Stderr, "missing <sid>")
+		exitFunc(1)
+		return
+	}
+
+	// Prefer the session's own project (mirrors resolveProjectForShow) so
+	// callers in foreign cwd paths still get the right scope.
+	proj, pErr := resolveProjectForShow(cfg, sessionID)
+	if pErr != nil {
+		// Fall back to cwd-based project detection if the session row
+		// is missing (orphaned id case).
+		proj = resolveSessionListProject(projectFlag)
+	}
+	if proj == "" {
+		proj = resolveSessionListProject(projectFlag)
+	}
+	if proj == "" {
+		fmt.Fprintln(os.Stderr, "could not detect project; pass --project")
+		exitFunc(1)
+		return
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	turns, err := s.RecoverTruncated(ctx, sessionID, proj)
+	if err != nil {
+		fatal(err)
+		return
+	}
+
+	fmt.Printf("Session Recover\n")
+	fmt.Printf("  session_id: %s\n", sessionID)
+	fmt.Printf("  project:    %s\n", proj)
+	fmt.Printf("  Recoverable turns: %d\n\n", len(turns))
+	if len(turns) == 0 {
+		fmt.Println("  (no truncated turns — nothing to recover)")
+		return
+	}
+	for _, tn := range turns {
+		fmt.Printf("  turn_seq=%d  id=%s  role=%s\n",
+			tn.TurnSeq, tn.ID, tn.Role)
+	}
+}
+
+// ─── export ──────────────────────────────────────────────────────────────────
 
 // ─── export ──────────────────────────────────────────────────────────────────
 
