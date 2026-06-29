@@ -46,9 +46,26 @@ func NewFileTransport(syncDir string) *FileTransport {
 	return &FileTransport{syncDir: syncDir}
 }
 
+// validateSyncDir returns an error when syncDir does not resolve to a directory.
+// os.Stat errors are propagated directly so callers can use os.IsNotExist to
+// distinguish a missing path from a path that is not a directory.
+func validateSyncDir(syncDir string) error {
+	info, err := os.Stat(syncDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("sync dir is not a directory: %s", syncDir)
+	}
+	return nil
+}
+
 // ReadManifest reads the manifest.json from the sync directory.
 // Returns an empty manifest (Version=1) if the file does not exist.
 func (ft *FileTransport) ReadManifest() (*Manifest, error) {
+	if err := validateSyncDir(ft.syncDir); err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
 	path := filepath.Join(ft.syncDir, "manifest.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -67,6 +84,9 @@ func (ft *FileTransport) ReadManifest() (*Manifest, error) {
 
 // WriteManifest writes the manifest to manifest.json in the sync directory.
 func (ft *FileTransport) WriteManifest(m *Manifest) error {
+	if err := validateSyncDir(ft.syncDir); err != nil {
+		return fmt.Errorf("write manifest: %w", err)
+	}
 	path := filepath.Join(ft.syncDir, "manifest.json")
 	data, err := jsonMarshalManifest(m, "", "  ")
 	if err != nil {
@@ -77,6 +97,9 @@ func (ft *FileTransport) WriteManifest(m *Manifest) error {
 
 // WriteChunk writes gzipped chunk data to the chunks/ subdirectory.
 func (ft *FileTransport) WriteChunk(chunkID string, data []byte, _ ChunkEntry) error {
+	if err := validateSyncDir(ft.syncDir); err != nil {
+		return err
+	}
 	chunksDir := filepath.Join(ft.syncDir, "chunks")
 	if err := os.MkdirAll(chunksDir, 0755); err != nil {
 		return fmt.Errorf("create chunks dir: %w", err)
@@ -88,6 +111,9 @@ func (ft *FileTransport) WriteChunk(chunkID string, data []byte, _ ChunkEntry) e
 
 // ReadChunk reads gzipped chunk data from the chunks/ subdirectory.
 func (ft *FileTransport) ReadChunk(chunkID string) ([]byte, error) {
+	if err := validateSyncDir(ft.syncDir); err != nil {
+		return nil, err
+	}
 	chunksDir := filepath.Join(ft.syncDir, "chunks")
 	chunkPath := filepath.Join(chunksDir, chunkID+".jsonl.gz")
 	data, err := readGzip(chunkPath)
