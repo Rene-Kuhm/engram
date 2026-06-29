@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -338,19 +339,32 @@ func parseSessionForkArgs(args []string) (sid, atTurnID string, rest []string, e
 
 func cmdSessionRewind(cfg store.Config) {
 	args := os.Args[3:]
-	sessionID, atTurnID, mode, projectFlag, parseErr := parseSessionRewindArgs(args)
+	sessionID, atTurnID, mode, projectFlag, confirmTruncate, parseErr := parseSessionRewindArgs(args)
 	if parseErr != nil {
 		fmt.Fprintln(os.Stderr, parseErr.Error())
 		exitFunc(1)
 		return
 	}
 	if sessionID == "" || atTurnID == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram session rewind <sid> --at <turn_id> [--mode branch|truncate] [--project P] [--confirm-truncate]")
+		fmt.Fprintln(os.Stderr, "usage: engram session rewind <sid> --at <turn_id> [--mode branch|truncate] [--confirm] [--project P]")
 		exitFunc(1)
 		return
 	}
 	if mode == "" {
 		mode = "branch"
+	}
+
+	// CLI-level defense-in-depth (lock-in decision Q6 / Risk #2): if the
+	// caller asks for truncate without explicit --confirm, fail closed
+	// BEFORE we touch the backend. This is the third guard in REQ-011's
+	// three-layer fence (parser, service, repo).
+	if mode == "truncate" && !confirmTruncate {
+		fmt.Fprintln(os.Stderr,
+			"refusing rewind --mode truncate without --confirm: "+
+				"truncate is destructive and permanent unless recovered via `engram session recover`",
+		)
+		exitFunc(1)
+		return
 	}
 
 	proj := resolveSessionListProject(projectFlag)
@@ -364,16 +378,21 @@ func cmdSessionRewind(cfg store.Config) {
 
 	ctx := context.Background()
 	res, err := s.RewindSession(ctx, store.RewindSessionParams{
-		SessionID:   sessionID,
-		AtTurnID:    atTurnID,
-		Mode:        store.RewindMode(mode),
-		FromProject: proj,
+		SessionID:       sessionID,
+		AtTurnID:        atTurnID,
+		Mode:            store.RewindMode(mode),
+		FromProject:     proj,
+		ConfirmTruncate: confirmTruncate,
 	})
 	if err != nil {
-		// Truncate mode is reserved for PR4 — keep the user-facing error
-		// honest about that.
-		if strings.Contains(err.Error(), "truncate mode not implemented") {
-			fmt.Fprintln(os.Stderr, "not implemented: rewind --mode truncate is reserved for PR4 (use --mode branch instead)")
+		// Service-level REQ-011 guard: the backend must also reject
+		// truncate-without-confirm (errors.Is lets us match the sentinel
+		// rather than scrape the message text).
+		if errors.Is(err, store.ErrTruncateRequiresConfirmation) {
+			fmt.Fprintln(os.Stderr,
+				"truncate without confirm rejected: "+
+					"truncate is destructive and permanent unless recovered via `engram session recover`",
+			)
 			exitFunc(1)
 			return
 		}
@@ -393,35 +412,37 @@ func cmdSessionRewind(cfg store.Config) {
 	}
 }
 
-func parseSessionRewindArgs(args []string) (sid, atTurnID, mode, project string, err error) {
+func parseSessionRewindArgs(args []string) (sid, atTurnID, mode, project string, confirmTruncate bool, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
 		case "--at":
 			if i+1 >= len(args) {
-				return "", "", "", "", fmt.Errorf("--at requires a turn_id argument")
+				return "", "", "", "", false, fmt.Errorf("--at requires a turn_id argument")
 			}
 			atTurnID = args[i+1]
 			i++
 		case "--mode":
 			if i+1 >= len(args) {
-				return "", "", "", "", fmt.Errorf("--mode requires a value (branch|truncate)")
+				return "", "", "", "", false, fmt.Errorf("--mode requires a value (branch|truncate)")
 			}
 			mode = args[i+1]
 			i++
 		case "--project":
 			if i+1 >= len(args) {
-				return "", "", "", "", fmt.Errorf("--project requires a value")
+				return "", "", "", "", false, fmt.Errorf("--project requires a value")
 			}
 			project = args[i+1]
 			i++
+		case "--confirm", "--confirm-truncate":
+			confirmTruncate = true
 		default:
 			if sid == "" && !strings.HasPrefix(a, "--") {
 				sid = a
 			}
 		}
 	}
-	return sid, atTurnID, mode, project, nil
+	return sid, atTurnID, mode, project, confirmTruncate, nil
 }
 
 // ─── export ──────────────────────────────────────────────────────────────────

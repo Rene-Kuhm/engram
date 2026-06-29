@@ -229,6 +229,107 @@ func TestSessionRewind_BranchMode(t *testing.T) {
 	}
 }
 
+// TestSessionRewind_TruncateMode_CLISurface covers PR4 / REQ-011:
+//   - `engram session rewind --mode truncate --confirm` MUST succeed
+//     and print a soft_deleted count.
+//   - The session_id in the output MUST be the source session (NOT a
+//     new one — truncate is destructive in place).
+//   - The source session must still have its kept prefix and the
+//     descendant rows remain in the table (proof of recoverability).
+func TestSessionRewind_TruncateMode_CLISurface(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-rewind-trunc.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, string(out))
+	}
+	t.Chdir(dir)
+
+	cfg := testConfig(t)
+	const sessionID = "sess-rewind-trunc-001"
+	const project = "session-rewind-trunc"
+
+	s := openSeedStore(t, cfg)
+	rootID := mustSeedTurn(t, s, sessionID, project, "user", "trunc-root", nil)
+	midID := mustSeedTurn(t, s, sessionID, project, "assistant", "trunc-mid", &rootID)
+	_ = mustSeedTurn(t, s, sessionID, project, "user", "trunc-leaf", &midID)
+
+	withArgs(t, "engram", "session", "rewind", sessionID,
+		"--at", midID, "--mode", "truncate", "--confirm")
+	stubExitWithPanic(t)
+	stdout, stderr, _ := captureOutputAndRecover(t, func() { cmdSession(cfg) })
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %q", stderr)
+	}
+	if !strings.Contains(stdout, "soft_deleted: 1") {
+		t.Errorf("expected soft_deleted count in stdout; got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "mode:       truncate") {
+		t.Errorf("expected mode=truncate in stdout; got: %q", stdout)
+	}
+	// Truncate MUST NOT print a new session id (destructive-in-place).
+	// We do NOT call extractNewSessionID here on purpose: that helper
+	// would match the source id embedded in the audit log. Instead we
+	// verify the absence of the "new_id:" line that branch mode prints.
+	if strings.Contains(stdout, "new_id:") {
+		t.Errorf("truncate mode must NOT print new_id (destructive-in-place); got: %q", stdout)
+	}
+
+	// Source session's kept prefix is intact: ListTurns returns 2 turns
+	// (root + mid). The third (leaf) is soft-deleted, hidden by default
+	// in ListTurns.
+	listed, err := s.ListTurns(context.Background(), sessionID, store.ListTurnsOpts{})
+	if err != nil {
+		t.Fatalf("ListTurns: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Errorf("kept prefix has %d turns, want 2 (root + mid)", len(listed))
+	}
+}
+
+// TestSessionRewind_TruncateWithoutConfirm_Rejected covers PR4 /
+// REQ-011 CLI-level defense-in-depth (Risk #2): `engram session rewind
+// --mode truncate` without `--confirm` MUST exit non-zero with a clear
+// message — even if the backend would also reject (REQ-011 has three
+// guards: CLI parser, service entry, repository guard).
+func TestSessionRewind_TruncateWithoutConfirm_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-rewind-trunc-rejected.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	cfg := testConfig(t)
+	const sessionID = "sess-rewind-no-confirm"
+	const project = "session-rewind-trunc-rejected"
+
+	s := openSeedStore(t, cfg)
+	rootID := mustSeedTurn(t, s, sessionID, project, "user", "nc-root", nil)
+	midID := mustSeedTurn(t, s, sessionID, project, "assistant", "nc-mid", &rootID)
+	_ = mustSeedTurn(t, s, sessionID, project, "user", "nc-leaf", &midID)
+
+	withArgs(t, "engram", "session", "rewind", sessionID,
+		"--at", midID, "--mode", "truncate")
+	stubExitWithPanic(t)
+	_, _, recovered := captureOutputAndRecover(t, func() { cmdSession(cfg) })
+	if recovered == nil {
+		t.Fatalf("truncate-without-confirm must exit non-zero (got nil panic); defense-in-depth violated")
+	}
+
+	// Source session is unchanged: kept prefix (root + mid) intact.
+	listed, err := s.ListTurns(context.Background(), sessionID, store.ListTurnsOpts{})
+	if err != nil {
+		t.Fatalf("ListTurns: %v", err)
+	}
+	if len(listed) != 3 {
+		t.Errorf("source session has %d turns, want 3 (unchanged by rejected truncate)", len(listed))
+	}
+}
+
 // TestSessionExport_ImportRoundtrip seeds a session, exports it via
 // `engram session export <sid>` to a temp file, then imports that file via
 // `engram session import <path>` into a fresh session. The import must
