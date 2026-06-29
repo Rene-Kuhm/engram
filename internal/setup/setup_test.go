@@ -1171,6 +1171,11 @@ func TestInjectOpenCodeMCPConfigErrors(t *testing.T) {
 }
 
 func TestDefaultRunCommandExecutes(t *testing.T) {
+	// REQ-D-1 (baseline-cleanup): POSIX `sh` is not on Windows PATH; the default
+	// runCommand seam calls exec.Command("sh", "-c", ...). Skip on Windows.
+	if runtimeGOOS == "windows" {
+		t.Skip("TestDefaultRunCommandExecutes uses POSIX sh which is not available on Windows PATH; see REQ-D-1")
+	}
 	resetSetupSeams(t)
 	out, err := runCommand("sh", "-c", "printf ok")
 	if err != nil {
