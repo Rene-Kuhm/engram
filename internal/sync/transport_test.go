@@ -18,6 +18,20 @@ func TestFileTransportReadManifestMissing(t *testing.T) {
 	}
 }
 
+func TestFileTransportReadManifestMissingDir(t *testing.T) {
+	ft := NewFileTransport(filepath.Join(t.TempDir(), "nonexistent", ".engram"))
+	m, err := ft.ReadManifest()
+	if err != nil {
+		t.Fatalf("ReadManifest should not error on missing syncDir; got %v", err)
+	}
+	if m == nil {
+		t.Fatalf("ReadManifest returned nil manifest")
+	}
+	if m.Version != 1 {
+		t.Fatalf("expected v1 manifest; got %+v", m)
+	}
+}
+
 func TestFileTransportManifestRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	ft := NewFileTransport(dir)
