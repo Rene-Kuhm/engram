@@ -108,6 +108,7 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 	// unchanged on real user machines; resetSetupSeams restores it via
 	// t.Cleanup after this test.
 	geminiConfigPathFn = func() string { return filepath.Join(home, ".gemini", "settings.json") }
+	codexConfigPathFn = func() string { return filepath.Join(home, ".codex", "config.toml") }
 
 	configPath := filepath.Join(home, ".gemini", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -325,6 +326,7 @@ func TestInstallCodexPluginCLIPresent(t *testing.T) {
 	resetSetupSeams(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	codexConfigPathFn = func() string { return filepath.Join(home, ".codex", "config.toml") }
 
 	var commands [][]string
 	lookPathFn = func(file string) (string, error) {
@@ -429,6 +431,7 @@ func TestInstallCodexPluginIdempotentAlreadyInOutput(t *testing.T) {
 	resetSetupSeams(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	codexConfigPathFn = func() string { return filepath.Join(home, ".codex", "config.toml") }
 
 	lookPathFn = func(file string) (string, error) {
 		if file == "codex" {
