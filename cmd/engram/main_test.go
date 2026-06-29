@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +78,22 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	os.Stdout = outW
 	os.Stderr = errW
 
+	// Drain pipes concurrently with fn(). Windows pipe buffers are ~4KB;
+	// without concurrent readers the producer blocks on the second write
+	// when output exceeds the buffer (e.g., printUsage emits 6-8KB).
+	// Readers MUST start BEFORE fn() runs so the writer drains as it produces.
+	var wg sync.WaitGroup
+	var outBytes, errBytes []byte
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		outBytes, _ = io.ReadAll(outR)
+	}()
+	go func() {
+		defer wg.Done()
+		errBytes, _ = io.ReadAll(errR)
+	}()
+
 	fn()
 
 	_ = outW.Close()
@@ -84,14 +101,9 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	os.Stdout = oldOut
 	os.Stderr = oldErr
 
-	outBytes, err := io.ReadAll(outR)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	errBytes, err := io.ReadAll(errR)
-	if err != nil {
-		t.Fatalf("read stderr: %v", err)
-	}
+	wg.Wait()
+	_ = outR.Close()
+	_ = errR.Close()
 
 	return string(outBytes), string(errBytes)
 }
