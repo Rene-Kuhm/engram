@@ -84,6 +84,17 @@ var (
 	// It runs "mise current node" and returns the result as a "node@X.Y.Z" specifier.
 	// Returns an empty string when the version cannot be determined.
 	resolveMiseNodeVersionFn = resolveMiseNodeVersion
+
+	// geminiConfigPathFn is a seam for test-driven install paths. The default
+	// delegates to geminiConfigPath so production behavior is unchanged on real
+	// user machines (resolves %APPDATA% on Windows via geminiConfigPath). Tests
+	// override it to redirect the install path to t.TempDir() — see REQ-A-0
+	// root cause (Engram #384) for why t.Setenv("HOME", ...) is insufficient on
+	// Windows.
+	geminiConfigPathFn = geminiConfigPath
+
+	// codexConfigPathFn mirrors geminiConfigPathFn for codex install paths.
+	codexConfigPathFn = codexConfigPath
 )
 
 //go:embed plugins/opencode/*
@@ -1004,7 +1015,7 @@ func AddClaudeCodeAllowlist() error {
 // ─── Gemini CLI ──────────────────────────────────────────────────────────────
 
 func installGeminiCLI() (*Result, error) {
-	path := geminiConfigPath()
+	path := geminiConfigPathFn()
 	if err := injectGeminiMCPFn(path); err != nil {
 		return nil, err
 	}
@@ -1181,7 +1192,7 @@ func removeGeminiEnvOverride() {
 // ─── Codex ───────────────────────────────────────────────────────────────────
 
 func installCodex() (*Result, error) {
-	path := codexConfigPath()
+	path := codexConfigPathFn()
 
 	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
@@ -1377,11 +1388,11 @@ func geminiConfigPath() string {
 }
 
 func geminiSystemPromptPath() string {
-	return filepath.Join(filepath.Dir(geminiConfigPath()), "system.md")
+	return filepath.Join(filepath.Dir(geminiConfigPathFn()), "system.md")
 }
 
 func geminiEnvPath() string {
-	return filepath.Join(filepath.Dir(geminiConfigPath()), ".env")
+	return filepath.Join(filepath.Dir(geminiConfigPathFn()), ".env")
 }
 
 func codexConfigPath() string {
@@ -1399,9 +1410,9 @@ func codexConfigPath() string {
 }
 
 func codexInstructionsPath() string {
-	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-instructions.md")
+	return filepath.Join(filepath.Dir(codexConfigPathFn()), "engram-instructions.md")
 }
 
 func codexCompactPromptPath() string {
-	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-compact-prompt.md")
+	return filepath.Join(filepath.Dir(codexConfigPathFn()), "engram-compact-prompt.md")
 }
