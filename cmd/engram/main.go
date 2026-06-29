@@ -647,7 +647,9 @@ func main() {
 	case "stats":
 		cmdStats(cfg)
 	case "export":
-		cmdExport(cfg)
+		if _, err := cmdExport(cfg); err != nil {
+			fatal(err)
+		}
 	case "import":
 		cmdImport(cfg)
 	case "sync":
@@ -1352,7 +1354,7 @@ func cmdStats(cfg store.Config) {
 	fmt.Printf("  Database:     %s/engram.db\n", cfg.DataDir)
 }
 
-func cmdExport(cfg store.Config) {
+func cmdExport(cfg store.Config) (string, error) {
 	outFile := "engram-export.json"
 	if len(os.Args) > 2 {
 		outFile = os.Args[2]
@@ -1360,28 +1362,29 @@ func cmdExport(cfg store.Config) {
 
 	s, err := storeNew(cfg)
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 	defer s.Close()
 
 	data, err := storeExport(s)
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 
 	out, err := jsonMarshalIndent(data, "", "  ")
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 
 	if err := os.WriteFile(outFile, out, 0644); err != nil {
-		fatal(err)
+		return "", fmt.Errorf("write %s: %w", outFile, err)
 	}
 
 	fmt.Printf("Exported to %s\n", outFile)
 	fmt.Printf("  Sessions:     %d\n", len(data.Sessions))
 	fmt.Printf("  Observations: %d\n", len(data.Observations))
 	fmt.Printf("  Prompts:      %d\n", len(data.Prompts))
+	return outFile, nil
 }
 
 func cmdImport(cfg store.Config) {

@@ -2454,16 +2454,10 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 
 	badPath := filepath.Join(workDir, "missing", "out.json")
 	withArgs(t, "engram", "export", badPath)
-	_, stderr, recovered = captureOutputAndRecover(t, func() { cmdExport(cfg) })
-	if _, ok := recovered.(exitCode); !ok {
-		t.Fatalf("expected export write fatal, panic=%v stderr=%q", recovered, stderr)
-	}
-	// REQ-D-2 (baseline-cleanup): cmdExport calls fatal(err) on WriteFile failure,
-	// which panics with an int exitCode — the underlying fs error is NOT surfaced.
-	// Reproduce the same operation independently and assert the portable error
-	// class so the test passes on both POSIX and Windows.
-	if writeErr := os.WriteFile(badPath, nil, 0644); writeErr == nil || !errors.Is(writeErr, fs.ErrNotExist) {
-		t.Fatalf("expected fs.ErrNotExist writing to %q, got %v", badPath, writeErr)
+	_, _, _ = captureOutputAndRecover(t, func() { _, _ = cmdExport(cfg) })
+	_, exportErr := cmdExport(cfg)
+	if exportErr == nil || !errors.Is(exportErr, fs.ErrNotExist) {
+		t.Fatalf("expected fs.ErrNotExist writing to %q, got %v", badPath, exportErr)
 	}
 
 	withArgs(t, "engram", "import")
@@ -2534,7 +2528,6 @@ func TestStoreInitFailurePaths(t *testing.T) {
 		cmdTimeline,
 		cmdContext,
 		cmdStats,
-		cmdExport,
 		cmdImport,
 		cmdSync,
 	}
@@ -2548,7 +2541,6 @@ func TestStoreInitFailurePaths(t *testing.T) {
 		{"engram", "timeline", "1"},
 		{"engram", "context"},
 		{"engram", "stats"},
-		{"engram", "export"},
 		{"engram", "import", importFile},
 		{"engram", "sync"},
 	}
@@ -2562,6 +2554,12 @@ func TestStoreInitFailurePaths(t *testing.T) {
 		if !strings.Contains(stderr, "store init failed") {
 			t.Fatalf("command %d: expected store failure stderr, got %q", i, stderr)
 		}
+	}
+
+	withArgs(t, "engram", "export")
+	_, exportErr := cmdExport(cfg)
+	if exportErr == nil || !strings.Contains(exportErr.Error(), "store init failed") {
+		t.Fatalf("export: expected store init failure, got %v", exportErr)
 	}
 }
 
@@ -3945,8 +3943,10 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		storeExport = func(*store.Store) (*store.ExportData, error) {
 			return nil, errors.New("forced export error")
 		}
-		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdExport(cfg) })
-		assertFatal(t, stderr, recovered, "forced export error")
+		_, exportErr := cmdExport(cfg)
+		if exportErr == nil || !strings.Contains(exportErr.Error(), "forced export error") {
+			t.Fatalf("export: expected forced export error, got %v", exportErr)
+		}
 	})
 
 	t.Run("export marshal seam error", func(t *testing.T) {
@@ -3955,8 +3955,10 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		jsonMarshalIndent = func(any, string, string) ([]byte, error) {
 			return nil, errors.New("forced marshal error")
 		}
-		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdExport(cfg) })
-		assertFatal(t, stderr, recovered, "forced marshal error")
+		_, marshalErr := cmdExport(cfg)
+		if marshalErr == nil || !strings.Contains(marshalErr.Error(), "forced marshal error") {
+			t.Fatalf("export: expected forced marshal error, got %v", marshalErr)
+		}
 	})
 
 	t.Run("sync seam status error", func(t *testing.T) {

@@ -567,9 +567,16 @@ func TestCmdExportAndImport(t *testing.T) {
 	exportPath := filepath.Join(t.TempDir(), "memories.json")
 
 	withArgs(t, "engram", "export", exportPath)
-	exportOut, exportErr := captureOutput(t, func() { cmdExport(sourceCfg) })
-	if exportErr != "" {
-		t.Fatalf("expected no stderr from export, got: %q", exportErr)
+	var exportOutFile string
+	var exportErr error
+	exportOut, _ := captureOutput(t, func() {
+		exportOutFile, exportErr = cmdExport(sourceCfg)
+	})
+	if exportErr != nil {
+		t.Fatalf("cmdExport: %v", exportErr)
+	}
+	if exportOutFile != exportPath {
+		t.Fatalf("expected outFile=%q, got %q", exportPath, exportOutFile)
 	}
 	if !strings.Contains(exportOut, "Exported to "+exportPath) {
 		t.Fatalf("unexpected export output: %q", exportOut)
