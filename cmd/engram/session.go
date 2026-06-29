@@ -48,13 +48,20 @@ func cmdSession(cfg store.Config) {
 
 func printSessionUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram session <subcommand> [options]")
-	fmt.Fprintln(os.Stderr, "subcommands: show, list, fork, rewind, export, import")
+	fmt.Fprintln(os.Stderr, "subcommands: show, list, fork, rewind, recover, export, import")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  show       <sid>                              Print latest leaf summary + turn_count + tree_depth.")
 	fmt.Fprintln(os.Stderr, "  list       [--project P] [--limit N]          List sessions for the project (auto-detect from cwd).")
 	fmt.Fprintln(os.Stderr, "  fork       <sid> --at <turn_id>              Clone the prefix path into a new session.")
-	fmt.Fprintln(os.Stderr, "  rewind     <sid> --at <turn_id> --mode M      Rewind. M=branch (default) creates a new session;")
-	fmt.Fprintln(os.Stderr, "                                                M=truncate is reserved for PR4.")
+	fmt.Fprintln(os.Stderr, "  rewind     <sid> --at <turn_id>               Rewind the session.")
+	fmt.Fprintln(os.Stderr, "                  --mode M (default: branch)    M=branch: clone the prefix into a new session.")
+	fmt.Fprintln(os.Stderr, "                  [--confirm]                    M=truncate: SOFT-delete descendants of --at")
+	fmt.Fprintln(os.Stderr, "                                                in the source session. truncate is destructive")
+	fmt.Fprintln(os.Stderr, "                                                and permanent unless recovered via `session recover`.")
+	fmt.Fprintln(os.Stderr, "                                                --confirm is REQUIRED when --mode=truncate")
+	fmt.Fprintln(os.Stderr, "                                                (defense-in-depth: REQ-011, Risk #2).")
+	fmt.Fprintln(os.Stderr, "  recover    <sid> [--project P]                Enumerate soft-deleted (truncated) descendant")
+	fmt.Fprintln(os.Stderr, "                                                turns; re-fork any of them via `session fork`.")
 	fmt.Fprintln(os.Stderr, "  export     <sid> [--out PATH]                Export turns as JSONL (one line per turn). Default: stdout.")
 	fmt.Fprintln(os.Stderr, "  import     <jsonl-file>                      Import a JSONL session into a new session id.")
 }
