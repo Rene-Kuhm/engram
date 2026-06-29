@@ -320,7 +320,13 @@ func (s *Store) ListTurns(ctx context.Context, sessionID string, opts ListTurnsO
 	)
 
 	filterPreTree := "AND (metadata_json IS NULL OR json_extract(metadata_json, '$.pre_tree') IS NULL OR json_extract(metadata_json, '$.pre_tree') != 1)"
-	filterNotTruncated := "AND (metadata_json IS NULL OR json_extract(metadata_json, '$.truncated_at_turn_id') IS NULL)"
+	// Truncation is session-scoped: only rows whose truncated marker
+	// points at THIS session are hidden. After a fork into a fresh
+	// session_id, cloned rows carry the source's marker baggage, but
+	// they ARE the visible content of the forked session — not a
+	// truncated row in the new session's view. This keeps the contract
+	// consistent with re-fork (REQ-007 truncate is recoverable).
+	filterNotTruncated := fmt.Sprintf("AND (metadata_json IS NULL OR json_extract(metadata_json, '$.truncated_from_session_id') IS NULL OR json_extract(metadata_json, '$.truncated_from_session_id') != '%s')", strings.ReplaceAll(sessionID, "'", "''"))
 
 	if opts.FromTurnID != nil {
 		// Subtree: descendants of opts.FromTurnID, excluding the turn itself.

@@ -303,10 +303,73 @@ func (s *Store) rewindTruncate(ctx context.Context, params RewindSessionParams) 
 	return RewindResult{SoftDeletedCount: len(descendants)}, nil
 }
 
+// ─── RecoverTruncated (PR4 / REQ-007 recovery story) ─────────────────────────
+//
+// RecoverTruncated returns every turn descendant of sessionID that was
+// soft-deleted by a previous RewindSession(Mode=truncate, ConfirmTruncate=true)
+// call — i.e., rows whose metadata.truncated_at_turn_id IS NOT NULL.
+//
+// The returned slice is ordered by turn_seq ASC so callers can present
+// rows in chronological order across recovery sessions, regardless of
+// ULID entropy. Rows preserve their full metadata (the truncated markers
+// added by rewindTruncate, plus any user-supplied fields) so the audit
+// trail survives a recovery fork.
+//
+// Contract:
+//   - Returns an empty slice (nil error) when the session has no
+//     truncated descendants. This is the contract that keeps the CLI's
+//     `engram session recover <sid>` no-op when nothing is recoverable.
+//   - Does NOT mutate any rows. Recovery is read-only; the caller forks
+//     via ForkSession to actually re-attach the descendant to a new
+//     session.
+//   - Filters pre_tree synthetic rows? NO — those are scoped out by the
+//     schema (pre_tree=true turns CANNOT be truncated: the soft-delete
+//     only marks descendant rows via stamp on the descendant itself, and
+//     pre_tree rows are leaves of the migration backfill, not part of
+//     the user-authored tree that truncate operates on).
+func (s *Store) RecoverTruncated(ctx context.Context, sessionID, project string) ([]Turn, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	project = strings.TrimSpace(project)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_turns: RecoverTruncated: session_id is required")
+	}
+	if project == "" {
+		return nil, fmt.Errorf("session_turns: RecoverTruncated: %w", ErrProjectRequired)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, project, parent_turn_id, turn_seq, role,
+		       content_json, agent_name, tokens_in, tokens_out,
+		       created_at, metadata_json
+		FROM session_turns
+		WHERE session_id = ?
+		  AND project = ?
+		  AND metadata_json IS NOT NULL
+		  AND json_extract(metadata_json, '$.truncated_at_turn_id') IS NOT NULL
+		ORDER BY turn_seq ASC
+	`, sessionID, project)
+	if err != nil {
+		return nil, fmt.Errorf("session_turns: RecoverTruncated query: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Turn{}
+	for rows.Next() {
+		turn, scanErr := scanTurnRow(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, turn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("session_turns: RecoverTruncated rows: %w", err)
+	}
+	return out, nil
+}
+
 // truncateDescendants returns every turn descendant of atTurnID
 // (excluding the turn itself), bounded by the session row count for
-// termination. Read-only — used by rewindTruncate (pre-UPDATE scan) and
-// by RecoverTruncated (post-truncate enumeration).
+// termination. Read-only — used by rewindTruncate (pre-UPDATE scan).
 func (s *Store) truncateDescendants(ctx context.Context, atTurnID, sessionID string) ([]Turn, error) {
 	var rowCount int
 	if err := s.db.QueryRowContext(ctx,
