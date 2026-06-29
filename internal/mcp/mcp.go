@@ -551,6 +551,12 @@ Examples:
 				mcp.WithString("scope",
 					mcp.Description("Filter observations by scope: project (default) or personal"),
 				),
+				mcp.WithNumber("include_last_k_turns",
+					mcp.Description("Opt-in (REQ-009): when > 0, append the last K turns of the active session to the context. pre_tree=true rows are excluded by default. Default 0 = unchanged v6 return shape."),
+				),
+				mcp.WithBoolean("include_legacy",
+					mcp.Description("Opt-in (Q1): when true, include pre_tree=true synthetic turns in the include_last_k_turns output. Default false."),
+				),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
 			handleContext(s, cfg, activity),
@@ -1281,9 +1287,46 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			activity.RecordSave(sessionID)
 		}
 
+		// PR3 single-write guard (design §2.6): when topic_key starts with
+		// "session/", the save ALSO writes a session_turns row so the
+		// SessionSummaryProjector can pick the active leaf. At most ONE
+		// turn row per call (REQ-004). Failure is non-fatal — the legacy
+		// observation already succeeded; failing the whole call would
+		// break REQ-014.
+		var turnWarning string
+		if strings.HasPrefix(topicKey, "session/") {
+			turnContentJSON, marshalErr := jsonMarshal([]map[string]string{
+				{"type": "text", "text": content},
+			})
+			if marshalErr != nil {
+				turnWarning = fmt.Sprintf("session turn row skipped: marshal failed: %v", marshalErr)
+			} else {
+				turnRole := "assistant"
+				if typ == "user" || typ == "tool" {
+					turnRole = typ
+				}
+				_, turnErr := s.SaveTurn(ctx, store.SaveTurnParams{
+					SessionID:   sessionID,
+					Project:     project,
+					Role:        turnRole,
+					ContentJSON: turnContentJSON,
+					Metadata: map[string]any{
+						"source":         "mem_save",
+						"observation_id": savedID,
+					},
+				})
+				if turnErr != nil {
+					turnWarning = fmt.Sprintf("session turn row skipped: %v", turnErr)
+				}
+			}
+		}
+
 		msg := fmt.Sprintf("Memory saved: %q (%s)", title, typ)
 		if topicKey == "" && suggestedTopicKey != "" {
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
+		}
+		if turnWarning != "" {
+			msg += "\n⚠ " + turnWarning
 		}
 		if truncated {
 			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", len(content), s.MaxObservationLength())
@@ -1605,6 +1648,10 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		// REQ-009: opt-in include_last_k_turns (default 0 = v6 return shape).
+		includeLastKTurns := intArg(req, "include_last_k_turns", 0)
+		// Q1: opt-in include_legacy flag (default false = pre_tree excluded).
+		includeLegacy := boolArg(req, "include_legacy", false)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -1639,7 +1686,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		}
 
 		if contextResult == "" {
-			return respondWithProject(detRes, "No previous session memories found.", nil), nil
+			contextResult = "No previous session memories found."
 		}
 
 		stats, _ := s.Stats()
@@ -1653,12 +1700,63 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
 
+		// REQ-009: opt-in last-K-turns block. Only fires when include_last_k_turns > 0
+		// AND the project is determinable (personal scope with no project override
+		// skips this — there's no single "active session" to anchor on).
+		if includeLastKTurns > 0 && contextProject != "" {
+			turnsBlock := formatLastKTurns(ctx, s, contextProject, sessionID, includeLastKTurns, includeLegacy)
+			if turnsBlock != "" {
+				result += "\n\n" + turnsBlock
+			}
+		}
+
 		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
 			result += nudge
 		}
 
 		return respondWithProject(detRes, result, nil), nil
 	}
+}
+
+// formatLastKTurns renders the last K turns of a session as a human-readable
+// list. Returns "" when no turns exist (so the caller can skip cleanly).
+//
+// pre_tree rows are excluded by default (Q1); include_legacy=true forces
+// them in. The output is text — agents paste it into their context window
+// verbatim.
+func formatLastKTurns(ctx context.Context, s *store.Store, project, sessionID string, k int, includeLegacy bool) string {
+	if k <= 0 || strings.TrimSpace(project) == "" {
+		return ""
+	}
+	turns, err := s.LastKTurns(ctx, sessionID, project, k, includeLegacy)
+	if err != nil || len(turns) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Recent session turns (last %d):", len(turns))
+	for _, turn := range turns {
+		text := extractFirstTextBlock(turn.ContentJSON)
+		fmt.Fprintf(&b, "\n- [#%d %s] %s", turn.TurnSeq, turn.Role, truncate(text, 200))
+	}
+	return b.String()
+}
+
+// extractFirstTextBlock pulls the first text-typed block out of a turn's
+// content_json for compact context rendering. Used by formatLastKTurns.
+func extractFirstTextBlock(content []byte) string {
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return ""
+	}
+	for _, blk := range blocks {
+		if blk.Type == "text" {
+			return blk.Text
+		}
+	}
+	return ""
 }
 
 func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
@@ -1880,6 +1978,19 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		// Ensure the implicit MCP session exists with the current working directory.
 		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
+		// REQ-008 + REQ-014 backwards-compat shim (PR3):
+		//
+		//   1. Write the legacy observation (existing v6 behavior —
+		//      preserved bit-for-bit so callers see no change).
+		//   2. Also write a session_turns row (role=system,
+		//      agent_name="system-summary") so the SessionSummaryProjector
+		//      has a leaf to summarize. The dual-write is the PR3
+		//      backwards-compat posture: v6 readers see the observation,
+		//      tree-aware readers see the turn row.
+		//
+		// Failures on the session_turns write are surfaced as a warning
+		// (NOT an error) because the legacy observation already
+		// succeeded — failing the whole call would break REQ-014.
 		_, err = s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      "session_summary",
@@ -1891,9 +2002,37 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
 		}
 
+		var turnWarning string
+		contentJSON, marshalErr := jsonMarshal([]map[string]string{
+			{"type": "text", "text": content},
+		})
+		if marshalErr != nil {
+			turnWarning = fmt.Sprintf("turn row skipped: marshal failed: %v", marshalErr)
+		} else {
+			agentName := "system-summary"
+			_, turnErr := s.SaveTurn(ctx, store.SaveTurnParams{
+				SessionID:   sessionID,
+				Project:     project,
+				Role:        "system",
+				ContentJSON: contentJSON,
+				AgentName:   &agentName,
+				Metadata: map[string]any{
+					"source":  "mem_session_summary",
+					"agent":   "system-summary",
+					"summary": true,
+				},
+			})
+			if turnErr != nil {
+				turnWarning = fmt.Sprintf("turn row skipped: %v", turnErr)
+			}
+		}
+
 		msg := fmt.Sprintf("Session summary saved for project %q", project)
 		if score := activity.ActivityScore(defaultSessionID(project)); score != "" {
 			msg += "\n" + score
+		}
+		if turnWarning != "" {
+			msg += "\n⚠ " + turnWarning
 		}
 		detRes.Project = project
 		return respondWithProject(detRes, msg, nil), nil

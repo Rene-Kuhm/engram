@@ -72,6 +72,72 @@ func (s *Store) CountTurns(ctx context.Context, project string) (int, error) {
 	return count, nil
 }
 
+// LastKTurns returns up to K most-recent turns for a session, ordered by
+// turn_seq ASC (so the output reads chronologically). REQ-009: powers the
+// opt-in mem_context.include_last_k_turns. pre_tree rows are excluded by
+// default (Q1); includeLegacy=true forces them in.
+//
+// K <= 0 returns nil without querying (the mem_context path treats it as
+// "feature off").
+func (s *Store) LastKTurns(ctx context.Context, sessionID, project string, k int, includeLegacy bool) ([]Turn, error) {
+	if k <= 0 {
+		return nil, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	project = strings.TrimSpace(project)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_summary: LastKTurns: session_id is required")
+	}
+	if project == "" {
+		return nil, ErrProjectRequired
+	}
+
+	// Subquery: pick the top-K turn_seq values for the session, then
+	// re-join for full row data. This keeps the LIMIT + ORDER BY off the
+	// full scan and aligns with the (session_id, turn_seq) index.
+	query := `
+		SELECT t.id, t.session_id, t.project, t.parent_turn_id, t.turn_seq, t.role,
+		       t.content_json, t.agent_name, t.tokens_in, t.tokens_out,
+		       t.created_at, t.metadata_json
+		FROM session_turns t
+		JOIN (
+			SELECT turn_seq FROM session_turns
+			WHERE session_id = ? AND project = ?
+			`
+	args := []any{sessionID, project}
+	if !includeLegacy {
+		query += ` AND (metadata_json IS NULL
+		            OR json_extract(metadata_json, '$.pre_tree') IS NULL
+		            OR json_extract(metadata_json, '$.pre_tree') != 1)`
+	}
+	query += `
+			ORDER BY turn_seq DESC
+			LIMIT ?
+		) latest ON latest.turn_seq = t.turn_seq AND t.session_id = ? AND t.project = ?
+		ORDER BY t.turn_seq ASC
+	`
+	args = append(args, k, sessionID, project)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("session_summary: LastKTurns: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Turn
+	for rows.Next() {
+		t, scanErr := scanTurnRow(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("session_summary: LastKTurns rows: %w", err)
+	}
+	return out, nil
+}
+
 // ProjectSessionSummary builds a SessionTreeSummary from the latest leaf of a
 // session's turn tree (REQ-008 + locked-in decision B). When the session
 // has no turns but a v6 sessions.summary exists, the v6 row is returned
